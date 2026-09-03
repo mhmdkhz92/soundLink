@@ -1,0 +1,74 @@
+# VS Code workspace settings and local state
+.vscode/
+*.code-workspace
+
+# C/C++ build directories
+build/
+Build/
+cmake-build-*/
+out/
+bin/
+obj/
+
+# Compiled objects, libraries, and executables
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.app/
+
+# Dependency and precompiled-header files
+*.d
+*.dep
+*.gch
+*.pch
+
+# Debugger and profiling output
+*.dSYM/
+*.pdb
+*.ilk
+*.idb
+*.ipdb
+*.iobj
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+
+# Windows/MSVC build output
+.vs/
+Debug/
+Release/
+x64/
+x86/
+ipch/
+*.tlog/
+*.lastbuildstate
+*.vcxproj.user
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# CMake-generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# macOS metadata
+.DS_Store
+
+# Windows metadata
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.stackdump
