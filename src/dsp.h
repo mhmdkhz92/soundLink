@@ -14,7 +14,7 @@ namespace soundlink{
     void kaiserWin(float *y, Kaiserparam p){
         float x = 0;
         float *arg = new float[p.numTaps];
-        for (int i = 0; i < p.numTaps; ++i){
+        for (size_t i = 0; i < p.numTaps; ++i){
             float t = std::pow(2 * x / (p.numTaps - 1) - 1, 2);
             arg[i] = p.beta * std::sqrtf(1 - t);
             x += 1;
@@ -76,7 +76,7 @@ namespace soundlink{
 
     //uses normalized bandwidth: BW/Fs (two sided) and normalized cutoff: Fc/Fs
     template<int up, int down>
-    class resampler:runnable{
+    struct resampler:runnable{
     public:
         resampler(scheduler *sch,  pipebuf<float> &_in, pipebuf<float> &_out,
              float n_cutoff, float n_transition)

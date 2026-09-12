@@ -57,7 +57,7 @@ namespace soundlink {
         }
     }
 
-    __declspec(noinline)
+    __attribute__((noinline))
     float dot_product(const float* __restrict a,
         const float* __restrict b, int count) noexcept {
         float result = 0.0f;
@@ -122,13 +122,13 @@ namespace soundlink {
         float *term = new float[N];
         float *x2 = new float[N];
         float k = 1;
-        for (int i = 0; i < N; ++i){
+        for (size_t i = 0; i < N; ++i){
             term[i] = 1;
             y[i] = 1;
             x2[i] = x[i] * x[i] / 4;
         }
         while (1){
-            for (int i = 0; i < N; ++i){
+            for (size_t i = 0; i < N; ++i){
                 term[i] *= x2[i] / (k * k);
                 y[i] += term[i];
             }
