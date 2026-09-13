@@ -3,9 +3,10 @@
 
 #include <math.h>
 #include <complex>
+#include "framework.h"
 
 
-constexpr float pi = 3.1415926535f;
+constexpr float pi = 3.14159265358979323846f;
 namespace soundlink {
     //multiply
     template<typename T>
@@ -57,11 +58,12 @@ namespace soundlink {
         }
     }
 
-    __attribute__((noinline))
     float dot_product(const float* __restrict a,
-        const float* __restrict b, int count) noexcept {
+        const float* __restrict b, unsigned N) noexcept {
+        if (N > INT_MAX)
+            fail("dot_product count exceeds INT_MAX");
         float result = 0.0f;
-        for (int i = 0; i < count; ++i)
+        for (unsigned i = 0; i < N; ++i)
             result += a[i] * b[i];
         return result;
     }
@@ -139,6 +141,92 @@ namespace soundlink {
         delete[] term;
         delete[] x2;
     }
+
+    struct fft_base {
+    virtual ~fft_base() = default;
+    virtual void forward(cf32* data) const = 0;
+    virtual void inverse(cf32* data) const = 0;
+    };
+
+    template <size_t N>
+    struct fft:fft_base {
+        static_assert(N == 128 || N == 256 || N == 512 || N == 1024, "wrong length");
+    private:
+        size_t bit_rev[N];
+        cf32 twiddles[N / 2];
+
+        void process(cf32* data, bool inverse) const {
+
+            // 1. Bit-reversal permutation
+            for (size_t i = 0; i < N; i++) {
+                size_t rev = bit_rev[i];
+                if (i < rev) {
+                    cf32 temp = data[i];
+                    data[i] = data[rev];
+                    data[rev] = temp;
+                }
+            }
+
+            // 2. Cooley-Tukey Radix-2 DIT computation
+            for (size_t step = 1; step < N; step *= 2) {
+                size_t jump = step * 2;
+                size_t twiddle_step = (N / 2) / step;
+
+                for (size_t i = 0; i < N; i += jump) {
+                    // inner loop
+                    for (size_t j = 0; j < step; j++) {
+                        cf32 twiddle = twiddles[j * twiddle_step];
+                        if (inverse) {
+                            twiddle = std::conj(twiddle);
+                        }
+
+                        cf32 t = twiddle * data[i + j + step];
+                        cf32 u = data[i + j];
+                        
+                        data[i + j] = u + t;
+                        data[i + j + step] = u - t;
+                    }
+                }
+            }
+
+            // 3. Normalization for IFFT
+            if (inverse) {
+                const float invN = 1.0f / N;
+                for (size_t i = 0; i < N; i++) {
+                    data[i] *= invN;
+                }
+            }
+        }
+
+    public:
+        fft() {
+            int log2N = 0;
+            while ((1ULL << log2N) < N) log2N++;
+
+            for (size_t i = 0; i < N; i++) {
+                size_t rev = 0;
+                for (int j = 0; j < log2N; j++) {
+                    if ((i >> j) & 1) {
+                        rev |= (1ULL << (log2N - 1 - j));
+                    }
+                }
+                bit_rev[i] = rev;
+            }
+
+            for (size_t i = 0; i < N / 2; i++) {
+                float angle = -2.0f * pi * i / N;
+                twiddles[i] = cf32(std::cosf(angle), std::sinf(angle));
+            }
+        }
+
+        void forward(cf32* data) const override {
+            process(data, false);
+        }
+
+        void inverse(cf32* data) const override {
+            process(data, true);
+        }
+    };
 }
 #endif
 

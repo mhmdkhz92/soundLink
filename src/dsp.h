@@ -1,8 +1,10 @@
 #ifndef SOUNDLINK_DSP_H
 #define SOUNDLINK_DSP_H
 
+#include <cstring>
 #include "framework.h"
 #include "math.h"
+#include "physical_layer.h"
 
 namespace soundlink{
 
@@ -11,7 +13,7 @@ namespace soundlink{
         size_t numTaps;
     };
 
-    void kaiserWin(float *y, Kaiserparam p){
+    inline void kaiserWin(float *y, Kaiserparam p){
         float x = 0;
         float *arg = new float[p.numTaps];
         for (size_t i = 0; i < p.numTaps; ++i){
@@ -24,7 +26,7 @@ namespace soundlink{
     }
 
 
-    Kaiserparam estimateKaiser(float attenuation_dB, float f_trans){
+    inline Kaiserparam estimateKaiser(float attenuation_dB, float f_trans){
         // Estimate beta.
         float beta = 0.0f;
 
@@ -53,7 +55,7 @@ namespace soundlink{
         return {beta, numTaps};
     }
 
-    void kaiserLpf(float* coefficients, float cutoff, Kaiserparam p){
+    inline void kaiserLpf(float* coefficients, float cutoff, Kaiserparam p){
     kaiserWin(coefficients, p);
 
     int center = static_cast<int>((p.numTaps - 1) / 2);
@@ -74,13 +76,14 @@ namespace soundlink{
     scale(coefficients, 1/sum, p.numTaps);
 }
 
+    // RESAMPLER runnable
     //uses normalized bandwidth: BW/Fs (two sided) and normalized cutoff: Fc/Fs
     template<int up, int down>
     struct resampler:runnable{
     public:
         resampler(scheduler *sch,  pipebuf<float> &_in, pipebuf<float> &_out,
              float n_cutoff, float n_transition)
-        :runnable(sch, _out.name),
+        :runnable(sch, "resampler"),
         in(_in), out(_out){
 
             Kaiserparam p = estimateKaiser(60, n_transition/up);
@@ -126,9 +129,66 @@ namespace soundlink{
         pipereader<float> in;
         pipewriter <float> out;
         float* filter = nullptr;
-        int L_phase = 0;
+        unsigned L_phase = 0;
+        unsigned filter_phase = 0;
         float** phase = nullptr;
-        int filter_phase = 0;
+    };
+
+    // baseband signal generator
+    struct ofdm_modulator: runnable{
+        ofdm_modulator(scheduler *sch,  pipebuf<cf32> &_in, pipebuf<cf32> &_out, 
+        link_cfg _cfg): runnable(sch, "ofdm_modulator"), 
+        in(_in), out(_out, (cfg.nFFT + cfg.cp) * cfg.nSym), cfg(_cfg){
+            fft_engines[0] = new fft<128>();fft_engines[1] = new fft<256>();
+            fft_engines[2] = new fft<512>();fft_engines[3] = new fft<1024>();
+            
+        }
+        void run() override{
+            if(in.readable() < cfg.nSC * cfg.nSym ||
+             out.writable() < (cfg.nFFT + cfg.cp) * cfg.nSym)
+                return;
+            
+
+            cf32* symin  = in.rd();
+            cf32* symout = out.wr();
+
+            for (size_t i = 0; i < (cfg.nFFT + cfg.cp) * cfg.nSym; ++i)
+                symout[i] = 0;
+
+            size_t out_offset = (size_t)(cfg.cp + cfg.nFFT - cfg.nSC/2);
+            size_t in_offset = (size_t)(cfg.nSC/2);
+            size_t fft_index = static_cast<size_t>(cfg.bw);
+            size_t sym_index = 0;
+            while(sym_index < cfg.nSym){
+                for(size_t i = 0; i < cfg.nSC/2; ++i){
+                    symout[out_offset + i] = symin[i];
+                    symout[cfg.cp + 1 + i] = symin[in_offset + i];    
+                }
+                fft_engines[fft_index]->inverse(symout + cfg.cp);
+                std::memmove(symout, symout + cfg.nFFT, sizeof(cf32) * cfg.cp);
+                symin +=  cfg.nSC;
+                symout +=  cfg.nFFT + cfg.cp;
+                sym_index ++;
+            }
+            in.read(cfg.nSym * cfg.nSC);
+            out.written(cfg.nSym * (cfg.nFFT + cfg.cp));
+        }
+        ~ofdm_modulator(){
+            delete fft_engines[0];
+            delete fft_engines[1];
+            delete fft_engines[2];
+            delete fft_engines[3];
+        }
+    
+    private:
+        link_cfg cfg;
+        fft_base* fft_engines[4];
+        pipereader<cf32> in;
+        pipewriter <cf32> out;
+
+
     };
 }
+
+
 #endif

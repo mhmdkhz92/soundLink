@@ -2,18 +2,15 @@
 #define SOUNDLINK_PHYSICAL_LAYER_H
 
 #include <vector>
-#include <complex>
 #include "framework.h"
 
-typedef uint32_t u32;
-typedef uint16_t u16;
-typedef uint8_t u8;
-typedef std::complex<float> cf32;
 
-typedef cf32 (*mod_t)(u8);
 
 namespace soundlink{
 
+    constexpr u16 NSYM_PER_RB = 6;
+
+    typedef cf32 (*mod_t)(u8);
     // defines
     enum class BW{
         BW1_4, BW3, BW5, BW10
@@ -26,29 +23,33 @@ namespace soundlink{
     };
 
     struct link_cfg{
-    float bandwidth;        // bandwidth in Hz
-    float sr;               // sample rate
-    u16 nRB;                // number of resource blocks
-    u16 nSC;                // number of active subcarriers
-    u16 nFFT;               // number of FFT points
-    link_cfg(BW _bw){
-        switch (_bw){
-        case BW::BW1_4:
-            bandwidth = 1.4e3; nRB = 6; nFFT = 128;
-            break;
-        case BW::BW3:
-            bandwidth = 3e3; nRB = 15; nFFT = 256;
-            break;
-        case BW::BW5:
-            bandwidth = 5e3; nRB = 25; nFFT = 512;
-            break;
-        case BW::BW10:
-            bandwidth = 10e3; nRB = 50; nFFT = 1024;
-            break;
+        BW bw;                  // bandwidth in BW enum
+        float bandwidth;        // bandwidth in Hz
+        float sr;               // sample rate
+        u16 nRB;                // number of resource blocks
+        u16 nSC;                // number of active subcarriers
+        u16 nFFT;               // number of FFT points
+        u16 nSym;             // number of symbols ber slot
+        u16 cp;                  // number of cyclic prefix points
+        link_cfg(BW _bw): nSym(NSYM_PER_RB){
+            switch (_bw){
+            case BW::BW1_4:
+                bw = BW::BW1_4; bandwidth = 1.4e3; nRB = 6; nFFT = 128;
+                break;
+            case BW::BW3:
+                bw = BW::BW3; bandwidth = 3e3; nRB = 15; nFFT = 256;
+                break;
+            case BW::BW5:
+                bw = BW::BW5; bandwidth = 5e3; nRB = 25; nFFT = 512;
+                break;
+            case BW::BW10:
+                bw = BW::BW10; bandwidth = 10e3; nRB = 50; nFFT = 1024;
+                break;
+            }
+            nSC = nRB * 12;
+            sr = nFFT * 15;
+            cp = nFFT / 4;
         }
-        nSC = nRB * 12;
-        sr = nFFT * 15;
-    }
     };
 
     // Abstraction of Physical Resource Blocks and slots
@@ -58,7 +59,7 @@ namespace soundlink{
         modulation m;
         pRB(u16 _idx, u16 _nRB):idx(_idx), nRB(_nRB),
         m(modulation::BPSK){
-            for(size_t i = 0; i < 12*6; ++i)
+            for(size_t i = 0; i < 12*nSym; ++i)
                 layout[i] = RE_type::D;
             for(size_t i = 0; i < 6; ++i)
                 set_label(plt_sc[i], plt_sym[i], RE_type::plt);
@@ -72,7 +73,7 @@ namespace soundlink{
             return (*this)(s, t);
         }
         bool nextData(u16& index) {
-            while (data_idx < 12 * 6) {
+            while (data_idx < 12 * nSym) {
                 const u16 local = data_idx++;
 
                 if (layout[local] == RE_type::D) {
@@ -108,9 +109,10 @@ namespace soundlink{
     private:
         const u16 idx;
         const u16 nRB;
-        RE_type layout[12 * 6];
+        static const u16 nSym = NSYM_PER_RB;
+        RE_type layout[12 * nSym];
         u16 data_idx = 0;
-        u16 dataRE_num = 12 * 6;
+        u16 dataRE_num = 12 * nSym;
 
     };
     struct slot{
@@ -255,7 +257,7 @@ namespace soundlink{
                 lfsr();
         }
     };
-    void pilot_fill(slot& sl, gold& gen, cf32* grid) {
+    inline void pilot_fill(slot& sl, gold& gen, cf32* grid) {
         for (pRB& rb : sl.rb_vec) {
             u16 bits = gen.step();
             for (u8 i = 0; i < 6; ++i) {
@@ -268,7 +270,7 @@ namespace soundlink{
     // synchronization section
 
     // zadoff-chu 62 length sequence with root: 25
-    void makePSS(cf32* out) {
+    inline void makePSS(cf32* out) {
         constexpr u8 root = 25;
         constexpr float pi = 3.141592;
 
@@ -279,7 +281,7 @@ namespace soundlink{
             out[n] = cf32(std::cos(phase), std::sin(phase));
         }
     }
-    void pss_fill(slot& sl, const cf32* pss, cf32* grid) {
+    inline void pss_fill(slot& sl, const cf32* pss, cf32* grid) {
         if (sl.sltnmb != 0)
             return;
 
@@ -305,13 +307,13 @@ namespace soundlink{
     struct slotMapper:runnable{
         slotMapper(scheduler* sch, pipebuf<u8>& _in, pipebuf<cf32>& _grid, link_cfg _cfg):
         runnable(sch, "slotMapper"), cfg(_cfg), primary(0, _cfg.nRB),
-        secondary(1, _cfg.nRB), in(_in), grid(_grid, _cfg.nSC * 6){
+        secondary(1, _cfg.nRB), in(_in), grid(_grid, _cfg.nSC * _cfg.nSym){
             makePSS(pss);
         }
         void run() override{
             slot& sl = slot_number == 0? primary:secondary;
             if(sl.capacity() > 8* in.readable() + mapper.available_bits ||
-                grid.writable() < cfg.nSC * 6)
+                grid.writable() < cfg.nSC * cfg.nSym)
                 return;
             pss_fill(sl, pss, grid.wr());
             pilot_fill(sl, pltGen, grid.wr());
@@ -326,7 +328,7 @@ namespace soundlink{
            if (slot_number == 0)
             pltGen.reset();
            sl.reset();
-           grid.written(cfg.nSC * 6);
+           grid.written(cfg.nSC * cfg.nSym);
         }
     private:
         link_cfg cfg;
