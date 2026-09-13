@@ -58,11 +58,12 @@ namespace soundlink {
         }
     }
 
-    float dot_product(const float* __restrict a,
+    template<typename T>
+    T dot_product(const T* __restrict a,
         const float* __restrict b, unsigned N) noexcept {
         if (N > INT_MAX)
             fail("dot_product count exceeds INT_MAX");
-        float result = 0.0f;
+        T result = 0;
         for (unsigned i = 0; i < N; ++i)
             result += a[i] * b[i];
         return result;
@@ -101,20 +102,25 @@ namespace soundlink {
         }
         return res;
     }
-    struct trianglut{
+    struct trianglut {
         float* sin;
         float* cos;
-        trianglut(float Fc, float Fs, int N){
-            sin = new float[N];
-            cos = new float[N];
-            float t = 0;
-            for (int i = 0; i < N; ++i){
-                sin[i] = std::sinf(2*pi*Fc * t);
-                cos[i] = std::cosf(2*pi*Fc * t);
-                t += 1/Fs;
+        size_t size;
+
+        trianglut(float Fc, float Fs, size_t N)
+            : sin(new float[N]), cos(new float[N]), size(N) {
+            update(Fc, Fs);
+        }
+
+        void update(float Fc, float Fs) {
+            for (size_t i = 0; i < size; ++i) {
+                const float phase = 2 * pi * Fc * i / Fs;
+                sin[i] = std::sin(phase);
+                cos[i] = std::cos(phase);
             }
         }
-        ~trianglut(){
+
+        ~trianglut() {
             delete[] sin;
             delete[] cos;
         }

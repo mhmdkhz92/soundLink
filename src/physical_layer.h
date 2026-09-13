@@ -305,7 +305,7 @@ namespace soundlink{
     
     // runnables:
     struct slotMapper:runnable{
-        slotMapper(scheduler* sch, pipebuf<u8>& _in, pipebuf<cf32>& _grid, link_cfg _cfg):
+        slotMapper(scheduler* sch, pipebuf<u8>& _in, pipebuf<cf32>& _grid, const link_cfg& _cfg):
         runnable(sch, "slotMapper"), cfg(_cfg), primary(0, _cfg.nRB),
         secondary(1, _cfg.nRB), in(_in), grid(_grid, _cfg.nSC * _cfg.nSym){
             makePSS(pss);
@@ -331,7 +331,7 @@ namespace soundlink{
            grid.written(cfg.nSC * cfg.nSym);
         }
     private:
-        link_cfg cfg;
+        const link_cfg& cfg;
         slot primary;
         slot secondary;
         u8 slot_number = 0;
