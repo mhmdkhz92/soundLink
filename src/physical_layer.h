@@ -205,7 +205,7 @@ namespace soundlink{
         inline static constexpr mod_t maps[7] = {nullptr, mapBPSK, mapQPSK,
             nullptr, mapQAM16, nullptr, mapQAM64};
 
-        size_t fill(pRB& rb, const u8* input, cf32* grid) {
+        size_t fill(pRB& rb, const u8* input, cv32 grid) {
             u8 bits = static_cast<u8>(rb.m);
             u8 mask = (1u << bits) - 1u;
             size_t consumed = 0;
@@ -257,7 +257,7 @@ namespace soundlink{
                 lfsr();
         }
     };
-    inline void pilot_fill(slot& sl, gold& gen, cf32* grid) {
+    inline void pilot_fill(slot& sl, gold& gen, cv32 grid) {
         for (pRB& rb : sl.rb_vec) {
             u16 bits = gen.step();
             for (u8 i = 0; i < 6; ++i) {
@@ -281,7 +281,7 @@ namespace soundlink{
             out[n] = cf32(std::cos(phase), std::sin(phase));
         }
     }
-    inline void pss_fill(slot& sl, const cf32* pss, cf32* grid) {
+    inline void pss_fill(slot& sl, const cf32* pss, cv32 grid) {
         if (sl.sltnmb != 0)
             return;
 
@@ -305,7 +305,7 @@ namespace soundlink{
     
     // runnables:
     struct slotMapper:runnable{
-        slotMapper(scheduler* sch, pipebuf<u8>& _in, pipebuf<cf32>& _grid, const link_cfg& _cfg):
+        slotMapper(scheduler* sch, pipebuf<u8>& _in, pipebuf_c<float>& _grid, const link_cfg& _cfg):
         runnable(sch, "slotMapper"), cfg(_cfg), primary(0, _cfg.nRB),
         secondary(1, _cfg.nRB), in(_in), grid(_grid, _cfg.nSC * _cfg.nSym){
             makePSS(pss);
@@ -315,13 +315,13 @@ namespace soundlink{
             if(sl.capacity() > 8* in.readable() + mapper.available_bits ||
                 grid.writable() < cfg.nSC * cfg.nSym)
                 return;
-            pss_fill(sl, pss, grid.wr());
-            pilot_fill(sl, pltGen, grid.wr());
+            pss_fill(sl, pss, grid.wr_c());
+            pilot_fill(sl, pltGen, grid.wr_c());
             /*
             management fill: TBD
             */
            for(pRB& _rb: sl.rb_vec){
-            size_t consumed = mapper.fill(_rb, in.rd(), grid.wr());
+            size_t consumed = mapper.fill(_rb, in.rd(), grid.wr_c());
             in.read(consumed);
            }
            slot_number = (++slot_number) % 5;
@@ -339,7 +339,7 @@ namespace soundlink{
         gold pltGen;
         cf32 pss[62];
         pipereader<u8> in;
-        pipewriter<cf32> grid;
+        pipewriter<float> grid;
         
     };
 

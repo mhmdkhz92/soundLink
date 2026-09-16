@@ -78,10 +78,10 @@ namespace soundlink{
 
     // RESAMPLER runnable
     //uses normalized bandwidth: BW/Fs (two sided) and normalized cutoff: Fc/Fs
-    template<typename T, int up, int down>
+    template<int up, int down>
     struct resampler:runnable{
     public:
-        resampler(scheduler *sch,  pipebuf<T> &_in, pipebuf<T> &_out,
+        resampler(scheduler *sch,  pipebuf_c<float> &_in, pipebuf_c<float> &_out,
              float n_cutoff, float n_transition)
         :runnable(sch, "resampler"),
         in(_in), out(_out){
@@ -104,30 +104,30 @@ namespace soundlink{
             delete[] h;
         }
         void run() override {
-            T* curr = in.rd();
-            T* end = curr + in.readable();
+            cv32 curr = in.rd_c();
+            float* end = curr.re + in.readable();
 
-            while (end - curr >= L_phase &&
-                end - curr >= (filter_phase + down) / up &&
+            while (end - curr.re >= L_phase &&
+                end - curr.re >= (filter_phase + down) / up &&
                 out.writable() > 0) {
-                T res = 0;
                 float* ph = phase[filter_phase];
-                res = dot_product(curr, ph, L_phase);
-                out.write(res);
+                float res_re = dot_product(curr.re, ph, L_phase);
+                float res_im = dot_product(curr.im, ph, L_phase);
+                out.write(std::complex(res_re, res_im));
                 filter_phase += down;
                 curr += filter_phase / up;
                 filter_phase %= up;
             }
 
-            in.read(curr - in.rd());
+            in.read(curr.re - in.rd());
         }
         ~resampler(){
             delete[] phase;
             delete[] filter;
         }
     private:
-        pipereader<T> in;
-        pipewriter <T> out;
+        pipereader<float> in;
+        pipewriter <float> out;
         float* filter = nullptr;
         unsigned L_phase = 0;
         unsigned filter_phase = 0;
@@ -136,7 +136,7 @@ namespace soundlink{
 
     // baseband signal generator
     struct ofdm_modulator: runnable{
-        ofdm_modulator(scheduler *sch,  pipebuf<cf32> &_in, pipebuf<cf32> &_out, 
+        ofdm_modulator(scheduler *sch,  pipebuf_c<float> &_in, pipebuf_c<float> &_out, 
         const link_cfg& _cfg): runnable(sch, "ofdm_modulator"), 
         in(_in), out(_out, (cfg.nFFT + cfg.cp) * cfg.nSym), cfg(_cfg){
             fft_engines[0] = new fft<128>();fft_engines[1] = new fft<256>();
@@ -149,8 +149,8 @@ namespace soundlink{
                 return;
             
 
-            cf32* symin  = in.rd();
-            cf32* symout = out.wr();
+            cv32 symin  = in.rd_c();
+            cv32 symout = out.wr_c();
 
             for (size_t i = 0; i < (cfg.nFFT + cfg.cp) * cfg.nSym; ++i)
                 symout[i] = 0;
@@ -165,9 +165,10 @@ namespace soundlink{
                     symout[cfg.cp + 1 + i] = symin[in_offset + i];    
                 }
                 fft_engines[fft_index]->inverse(symout + cfg.cp);
-                std::memmove(symout, symout + cfg.nFFT, sizeof(cf32) * cfg.cp);
-                symin +=  cfg.nSC;
-                symout +=  cfg.nFFT + cfg.cp;
+                std::memmove(symout.re, symout.re + cfg.nFFT, sizeof(float) * cfg.cp);
+                std::memmove(symout.im, symout.im + cfg.nFFT, sizeof(float) * cfg.cp);
+                symin += cfg.nSC;
+                symout += cfg.nFFT + cfg.cp;
                 sym_index ++;
             }
             in.read(cfg.nSym * cfg.nSC);
@@ -183,20 +184,21 @@ namespace soundlink{
     private:
         const link_cfg& cfg;
         fft_base* fft_engines[4];
-        pipereader<cf32> in;
-        pipewriter <cf32> out;
+        pipereader<float> in;
+        pipewriter <float> out;
 
 
     };
     struct ofdm_demodulator: runnable{
-        ofdm_demodulator(scheduler *sch, pipebuf<cf32> &_in,
-        pipebuf<cf32> &_out, const link_cfg& _cfg):
+        ofdm_demodulator(scheduler *sch, pipebuf_c<float> &_in,
+        pipebuf_c<float> &_out, const link_cfg& _cfg):
         runnable(sch, "ofdm_demodulator"),
         cfg(_cfg), in(_in), out(_out, _cfg.nSC * _cfg.nSym){
             fft_engines[0] = new fft<128>();fft_engines[1] = new fft<256>();
             fft_engines[2] = new fft<512>();fft_engines[3] = new fft<1024>();
 
-            buffer = new cf32[cfg.nFFT];
+            buffer_re = new float[cfg.nFFT];
+            buffer_im = new float[cfg.nFFT];
         }
 
         void run() override{
@@ -204,8 +206,8 @@ namespace soundlink{
             out.writable() < cfg.nSC * cfg.nSym)
                 return;
 
-            const cf32* symin = in.rd();
-            cf32* symout = out.wr();
+            cv32 symin = in.rd_c();
+            cv32 symout = out.wr_c();
 
             size_t in_offset = cfg.nFFT - cfg.nSC/2;
             size_t out_offset = cfg.nSC/2;
@@ -213,14 +215,16 @@ namespace soundlink{
             size_t sym_index = 0;
 
             while(sym_index < cfg.nSym){
-                std::memcpy(buffer, symin + cfg.cp,
-                            sizeof(cf32) * cfg.nFFT);
+                std::memcpy(buffer_re, symin.re + cfg.cp, sizeof(float) * cfg.nFFT);
+                std::memcpy(buffer_im, symin.im + cfg.cp, sizeof(float) * cfg.nFFT);
 
-                fft_engines[fft_index]->forward(buffer);
+                fft_engines[fft_index]->forward(cv32{buffer_re, buffer_im});
 
                 for(size_t i = 0; i < cfg.nSC/2; ++i){
-                    symout[i] = buffer[in_offset + i];
-                    symout[out_offset + i] = buffer[1 + i];
+                    symout.re[i] = buffer_re[in_offset + i];
+                    symout.im[i] = buffer_im[in_offset + i];
+                    symout.re[out_offset + i] = buffer_re[1 + i];
+                    symout.im[out_offset + i] = buffer_im[1 + i];
                 }
 
                 symin += cfg.nFFT + cfg.cp;
@@ -237,29 +241,31 @@ namespace soundlink{
             delete fft_engines[1];
             delete fft_engines[2];
             delete fft_engines[3];
-            delete[] buffer;
+            delete[] buffer_re;
+            delete[] buffer_im;
         }
 
     private:
         const link_cfg& cfg;
         fft_base* fft_engines[4];
-        pipereader<cf32> in;
-        pipewriter<cf32> out;
-        cf32* buffer;
+        pipereader<float> in;
+        pipewriter<float> out;
+        float* buffer_re;
+        float* buffer_im;
     };
     struct mixer: runnable{
-        mixer(scheduler* sch, pipebuf<cf32>& _in, pipebuf<float>& _out):
+        mixer(scheduler* sch, pipebuf_c<float>& _in, pipebuf<float>& _out):
         runnable(sch, "mixer"), in(_in), out(_out, 48), lut(fc, 48e3, winsize){
         }
         void run() override{
             while (in.readable() >= winsize &&
                 out.writable() >= winsize) {
-                const cf32* rd = in.rd();
-
+                const cv32 rd = in.rd_c();  
+                float* wr = out.wr();
                 for (size_t i = 0; i < winsize; ++i) {
-                    out.write(rd[i].real() * lut.cos[i] - rd[i].imag() * lut.sin[i]);
+                    wr[i] = (rd.re[i] * lut.cos[i] - rd.im[i] * lut.sin[i]);
                 }
-
+                out.written(winsize);
                 in.read(winsize);
             }
         }
@@ -272,9 +278,9 @@ namespace soundlink{
     }
     private:
         float fc = 5e3;
-        size_t winsize = 48;
+        const size_t winsize = 48;
         trianglut lut;
-        pipereader<cf32> in;
+        pipereader<float> in;
         pipewriter<float> out;
         
     };
