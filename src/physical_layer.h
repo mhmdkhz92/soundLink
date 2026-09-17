@@ -57,8 +57,7 @@ namespace soundlink{
     static constexpr u8 plt_sym[6] = {1, 1, 1, 4, 4, 4};
     struct pRB{
         modulation m;
-        pRB(u16 _idx, u16 _nRB):idx(_idx), nRB(_nRB),
-        m(modulation::BPSK){
+        pRB(u16 _idx, u16 _nRB):m(modulation::BPSK), idx(_idx), nRB(_nRB){
             for(size_t i = 0; i < 12*nSym; ++i)
                 layout[i] = RE_type::D;
             for(size_t i = 0; i < 6; ++i)
@@ -238,7 +237,7 @@ namespace soundlink{
         }
         gold():x1(1), x2(0x01234567u){
             // warm up
-            for (int i = 0; i < warm_up; ++i)
+            for (u32 i = 0; i < warm_up; ++i)
                 lfsr();
         }
         u16 step() {
@@ -253,7 +252,7 @@ namespace soundlink{
             x1 = 1;
             x2 = 0x01234567u;
             // warm up
-            for (int i = 0; i < warm_up; ++i)
+            for (u32 i = 0; i < warm_up; ++i)
                 lfsr();
         }
     };

@@ -207,7 +207,7 @@ namespace soundlink{
         unsigned long writable() {
             if ( buf.end-buf.wr < buf.min_write ) 
                 buf.pack();
-                return buf.end - buf.wr;
+            return buf.end - buf.wr;
         }
         T *wr(){
           return buf.wr;

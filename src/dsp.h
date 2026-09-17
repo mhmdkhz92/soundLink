@@ -76,69 +76,105 @@ namespace soundlink{
     scale(coefficients, 1/sum, p.numTaps);
 }
 
-    // RESAMPLER runnable
-    //uses normalized bandwidth: BW/Fs (two sided) and normalized cutoff: Fc/Fs
-    template<int up, int down>
-    struct resampler:runnable{
+    // digital up converter runnable
+    struct duc:runnable{
     public:
-        resampler(scheduler *sch,  pipebuf_c<float> &_in, pipebuf_c<float> &_out,
-             float n_cutoff, float n_transition)
-        :runnable(sch, "resampler"),
-        in(_in), out(_out){
+        duc(scheduler *sch,  pipebuf_c<float> &_in, pipebuf<float> &_out, const link_cfg& cfg)
+        :runnable(sch, "duc"),
+        in(_in), out(_out), lut(fc, 48e3, winsize), lut_idx(0){
 
-            Kaiserparam p = estimateKaiser(60, n_transition/up);
+            up = 25;
+            down = 1u << static_cast<unsigned>(cfg.bw); // 1, 2, 4, 8
+            // filter design
+            const float cutoff = 0.5f / up;
+            const float transition = (1.0f - cfg.bandwidth / cfg.sr) / up;
+
+            // apply design and obtain taps
+            Kaiserparam p = estimateKaiser(60, transition);
             L_phase = (p.numTaps + up - 1) / up;
 
             float* h = new float[up*L_phase]{};
             filter = new float[up*L_phase]{};
-            kaiserLpf(h, n_cutoff/up, p);
+            kaiserLpf(h, cutoff, p);
             scale(h, (float)up, p.numTaps);
 
             phase = new float*[up];
             for(int i = 0; i < up; i++){
                 phase[i] = filter + (i* L_phase);
-                for(int j = 0; j < L_phase; ++j){
+                for(unsigned int j = 0; j < L_phase; ++j){
                     filter[L_phase * (i + 1) - 1 - j] = h[i + up * j];
                 }
             }
             delete[] h;
         }
         void run() override {
-            cv32 curr = in.rd_c();
-            float* end = curr.re + in.readable();
+            const cv32 rd = in.rd_c();
+            const size_t available = in.readable();
+            const size_t capacity = out.writable();
+            float* wr = out.wr();
 
-            while (end - curr.re >= L_phase &&
-                end - curr.re >= (filter_phase + down) / up &&
-                out.writable() > 0) {
-                float* ph = phase[filter_phase];
-                float res_re = dot_product(curr.re, ph, L_phase);
-                float res_im = dot_product(curr.im, ph, L_phase);
-                out.write(std::complex(res_re, res_im));
+            const size_t required = std::max(
+                size_t(L_phase), size_t((down + up - 1) / up));
+
+            size_t consumed = 0;
+            size_t produced = 0;
+
+            while (available - consumed >= required && produced < capacity) {
+                const float* ph = phase[filter_phase];
+                const float* input_re = rd.re + consumed;
+                const float* input_im = rd.im + consumed;
+                float re = 0.0f;
+                float im = 0.0f;
+                for (unsigned j = 0; j < L_phase; ++j) {
+                    const float h = ph[j];
+                    re += input_re[j] * h;
+                    im += input_im[j] * h;
+                }
+                wr[produced++] = re * lut.cos[lut_idx] - im * lut.sin[lut_idx];
                 filter_phase += down;
-                curr += filter_phase / up;
+                consumed += filter_phase / up;
                 filter_phase %= up;
+                if (++lut_idx == winsize)
+                    lut_idx = 0;
             }
-
-            in.read(curr.re - in.rd());
+            in.read(consumed);
+            out.written(produced);
         }
-        ~resampler(){
+        void set_fc(int fc_kHz) {
+            if (fc_kHz < 2 || fc_kHz > 18)
+                fail("wrong centre frequency was attempted");
+
+            fc = fc_kHz * 1000.0f;
+            lut.update(fc, 48000.0f);
+    }
+        ~duc(){
             delete[] phase;
             delete[] filter;
         }
     private:
         pipereader<float> in;
         pipewriter <float> out;
+
+        // resampler attributes
+        int up;
+        int down;
         float* filter = nullptr;
         unsigned L_phase = 0;
         unsigned filter_phase = 0;
         float** phase = nullptr;
+
+        //mixer attributes
+        int winsize = 48;
+        float fc = 5e3;
+        trianglut lut;
+        int lut_idx;
     };
 
     // baseband signal generator
     struct ofdm_modulator: runnable{
         ofdm_modulator(scheduler *sch,  pipebuf_c<float> &_in, pipebuf_c<float> &_out, 
-        const link_cfg& _cfg): runnable(sch, "ofdm_modulator"), 
-        in(_in), out(_out, (cfg.nFFT + cfg.cp) * cfg.nSym), cfg(_cfg){
+        const link_cfg& _cfg): runnable(sch, "ofdm_modulator"),cfg(_cfg),
+        in(_in), out(_out, (cfg.nFFT + cfg.cp) * cfg.nSym){
             fft_engines[0] = new fft<128>();fft_engines[1] = new fft<256>();
             fft_engines[2] = new fft<512>();fft_engines[3] = new fft<1024>();
             
@@ -252,37 +288,6 @@ namespace soundlink{
         pipewriter<float> out;
         float* buffer_re;
         float* buffer_im;
-    };
-    struct mixer: runnable{
-        mixer(scheduler* sch, pipebuf_c<float>& _in, pipebuf<float>& _out):
-        runnable(sch, "mixer"), in(_in), out(_out, 48), lut(fc, 48e3, winsize){
-        }
-        void run() override{
-            while (in.readable() >= winsize &&
-                out.writable() >= winsize) {
-                const cv32 rd = in.rd_c();  
-                float* wr = out.wr();
-                for (size_t i = 0; i < winsize; ++i) {
-                    wr[i] = (rd.re[i] * lut.cos[i] - rd.im[i] * lut.sin[i]);
-                }
-                out.written(winsize);
-                in.read(winsize);
-            }
-        }
-        void set_fc(int fc_kHz) {
-            if (fc_kHz < 2 || fc_kHz > 18)
-                fail("wrong centre frequency was attempted");
-
-            fc = fc_kHz * 1000.0f;
-            lut.update(fc, 48000.0f);
-    }
-    private:
-        float fc = 5e3;
-        const size_t winsize = 48;
-        trianglut lut;
-        pipereader<float> in;
-        pipewriter<float> out;
-        
     };
 }
 

@@ -1,6 +1,7 @@
 # VS Code workspace settings and local state
 .vscode/
 *.code-workspace
+sanity
 
 # C/C++ build directories
 build/
