@@ -71,16 +71,6 @@ namespace soundlink{
         return result;
     }
 
-    // create an array of floating points from 0 to N-1
-    template<typename T>
-    inline void arange(T* a, T start, T step, size_t N){
-        T t = start;
-        for (size_t i = 0; i < N; ++i) {
-            a[i] = (T)t;
-            t += step;
-        }
-    }
-
     template<typename T>
     inline T min(const T* a, size_t size) {
         T res = a[0];
