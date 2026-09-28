@@ -10,6 +10,8 @@
 #include "puncture.h"
 
 extern unsigned char d_Partab[];
+const int POLYA = 0x4f;
+const int POLYB = 0x6d;
 typedef int (*punc_t)(const u8*, u8*, uint16_t&);
 enum code_rate {
 	FEC12, FEC23, FEC34, FEC56, FEC78,
@@ -41,8 +43,6 @@ class viterbi :runnable {
 private:
 	int cr[2] = {};
 	code_rate crate;
-	const int POLYA = 0x4f;
-	const int POLYB = 0x6d;
 	uint32_t state0[64] = {};
 	uint32_t state1[64] = {};
 	uint32_t* state = state0, * next = state1;
@@ -232,7 +232,7 @@ private:
 		
 public:
 	viterbi(scheduler* sch, pipebuf<u8>& _in,
-		pipebuf<u8>& _out, code_rate r) :runnable(sch, "VITERBI_A"),
+		pipebuf<u8>& _out, code_rate r) :runnable(sch, "VITERBI_S"),
 		out(_out), in(_in), crate(r)
 	{
 		switch (r) {
@@ -308,5 +308,69 @@ public:
 		for (int i = 0; i < 64; ++i)
 			state[i] -= min_metric;
 	}
+};
+
+class conv_encoder : public runnable {
+private:
+    pipereader<u8> in;
+    pipewriter<u8> out;
+
+    unsigned numerator = 0;
+    unsigned denominator = 0;
+    const bool* pattern = nullptr;
+    u8 enc_state = 0;
+
+public:
+    conv_encoder(scheduler* sch, pipebuf<u8>& input, pipebuf<u8>& output, code_rate rate):
+	runnable(sch, "CONV_ENCODER"), in(input), out(output){
+        switch (rate) {
+        case FEC12: numerator = 1; denominator = 2; break;
+        case FEC23: numerator = 2; denominator = 3; break;
+        case FEC34: numerator = 3; denominator = 4; break;
+        case FEC56: numerator = 5; denominator = 6; break;
+        case FEC78: numerator = 7; denominator = 8; break;
+        default:
+            fatal("encoder rate not supported");
+            return;
+        }
+        pattern = patterns[rate];
+        out.buf.min_write = denominator;
+    }
+    void run() override {
+        size_t groups = std::min(in.readable() / numerator, out.writable() / denominator);
+
+        if (groups == 0)
+            return;
+
+        const u8* src = in.rd();
+        u8* dst = out.wr();
+
+        const unsigned polys[] = {POLYA, POLYB};
+        unsigned phase = 0;
+        unsigned packed_bits = 0;
+        u8 packed = 0;
+
+        for (size_t i = 0; i < groups * numerator; ++i) {
+            u8 value = *src++;
+
+            for (int bit = 7; bit >= 0; --bit) {
+                enc_state = static_cast<u8>((enc_state << 1) | ((value >> bit) & 1));
+                for (unsigned poly : polys) {
+                    if (pattern[phase]) {
+                        packed = static_cast<u8>((packed << 1) | d_Partab[enc_state & poly]);
+                        if (++packed_bits == 8) {
+                            *dst++ = packed;
+                            packed = 0;
+                            packed_bits = 0;
+                        }
+                    }
+                    if (++phase == 2 * numerator)
+                        phase = 0;
+                }
+            }
+        }
+        in.read(groups * numerator);
+        out.written(groups * denominator);
+    }
 };
 #endif

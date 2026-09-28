@@ -2,6 +2,7 @@
 #define SOUNDLINK_PHYSICAL_LAYER_H
 
 #include <vector>
+#include <cmath>
 #include "framework.h"
 
 
@@ -198,6 +199,31 @@ namespace soundlink{
     return { lut_PAM8[i], lut_PAM8[q] };
     }
 
+    struct llrtab{
+        float llr_ceil = 6.0;
+        float bmax   = 1.5;
+        float q4max  = 2 * QPSK_NORM;
+        float q16max = 4 * QAM16_NORM;
+        float q64max = 8 * QAM64_NORM;
+        u8 bpsk[10];
+        u8 qpsk[16];
+        u8 qam16[2][32];
+        u8 qam64[3][64];
+        void bpsk_gen(){
+            float step = 2*bmax / 10;
+            float temp[10];
+            float sig2 = std::pow(0.6, 2);
+
+            float y = -bmax + 1.5 * step;
+            for (int i = 0 ; i < 10; ++i){
+                temp[i] = -2 * y / (sig2);
+            }
+            
+        }
+
+
+
+    };
     struct modulator {
         uint64_t pending = 0;
         u8 available_bits = 0;
@@ -341,6 +367,8 @@ namespace soundlink{
         pipewriter<float> grid;
         
     };
+
+
 
 }
 #endif //SOUNDLINK_PHYSICAL_LAYER_H
