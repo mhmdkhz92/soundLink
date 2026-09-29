@@ -199,56 +199,111 @@ namespace soundlink{
     return { lut_PAM8[i], lut_PAM8[q] };
     }
 
-    struct llrtab{
-        float llr_ceil = 6.0;
-        float bmax   = 1.5;
-        float q4max  = 2 * QPSK_NORM;
-        float q16max = 4 * QAM16_NORM;
-        float q64max = 8 * QAM64_NORM;
-        u8 bpsk[10];
-        u8 qpsk[16];
-        u8 qam16[2][32];
-        u8 qam64[3][64];
-        void bpsk_gen(){
-            float step = 2*bmax / 10;
-            float temp[10];
-            float sig2 = std::pow(0.6, 2);
-
-            float y = -bmax + 1.5 * step;
-            for (int i = 0 ; i < 10; ++i){
-                temp[i] = -2 * y / (sig2);
+    struct LLRtab{
+        LLRtab(){
+            float step = 2*d_max/(float)dim;
+            float d = -d_max + step/2;
+            for (int y = 0; y < dim; ++y){
+                bpsk[y] = 4.0f * d;
+                qpsk[y] = 4.0f * QPSK_NORM * d;
             }
-            
+            qam16dist();
+            qam64dist();
         }
-
-
-
-    };
-    struct modulator {
-        uint64_t pending = 0;
-        u8 available_bits = 0;
-        inline static constexpr mod_t maps[7] = {nullptr, mapBPSK, mapQPSK,
-            nullptr, mapQAM16, nullptr, mapQAM64};
-
-        size_t fill(pRB& rb, const u8* input, cv32 grid) {
-            u8 bits = static_cast<u8>(rb.m);
-            u8 mask = (1u << bits) - 1u;
-            size_t consumed = 0;
-            u16 index;
-
-            while (rb.nextData(index)) {
-                if (available_bits < bits) {
-                    pending |= uint64_t(input[consumed++])<< available_bits;
-                    available_bits += 8;
+        void eval(cf32 y, int m, u8* llr){
+            u8 re = loc_index(y.real());
+            u8 im = loc_index(y.real());
+            switch(m){
+                case 1:
+                    llr[0] = llr_round(bpsk[re]);
+                    break;
+                case 2:{
+                    llr[0] = llr_round(qpsk[re]);
+                    llr[1] = llr_round(qpsk[im]);
+                    break;
                 }
-                grid[index] = maps[bits](pending & mask);
-                pending >>= bits;
-                available_bits -= bits;
+                case 4:
+                    llr[0] = llr_round(qam16[0][re]);
+                    llr[1] = llr_round(qam16[1][re]);
+                    llr[2] = llr_round(qam16[0][im]);
+                    llr[3] = llr_round(qam16[1][im]);
+                    break;
+                case 6:
+                    llr[0] = llr_round(qam64[0][re]);
+                    llr[1] = llr_round(qam64[1][re]);
+                    llr[2] = llr_round(qam64[2][re]);
+                    llr[3] = llr_round(qam64[0][im]);
+                    llr[4] = llr_round(qam64[1][im]);
+                    llr[5] = llr_round(qam64[2][im]);
+                    break;
+
             }
-            return consumed;
+        }
+        void setN0(float _N0){
+            this->N0 = _N0;
+        }
+    private:
+        float llr_max = 6.0f;
+        float d_max = 1.2;
+        static constexpr int dim = 64;
+        float N0 = 1;
+        float bpsk[dim];
+        float qpsk[dim];
+        float qam16[2][dim];
+        float qam64[3][dim];
+
+        void qam16dist(){
+            float step = 2*d_max/(float)dim;
+            for (int loc = 0; loc < 2; ++loc){
+                float d = -d_max + step/2;
+                for (int y = 0; y < dim; ++y){
+                    float dist = dmin(d, lut_PAM4, 4, loc, 0) - dmin(d, lut_PAM4, 4, loc, 1);
+                    qam16[loc][y] = dist;
+                    d += step;
+                }
+            }
+        }
+        void qam64dist(){
+            float step = 2*d_max/(float)dim;
+            for (int loc = 0; loc < 3; ++loc){
+                float d = -d_max + step/2;
+                for (int y = 0; y < dim; ++y){
+                    float dist = dmin(d, lut_PAM8, 8, loc, 0) - dmin(d, lut_PAM8, 8, loc, 1);
+                    qam64[loc][y] = dist;
+                    d += step;
+                }
+            }
+        }
+        float dmin(float d, const float* pam_lut, int lut_size,
+            int loc, bool bit){
+                float dmin = std::pow(2*d_max, 2);
+                for (int i = 0; i < lut_size; ++i){
+                    if(bool(i & (lut_size >> (loc + 1))) == bit){
+                        float c = std::pow(pam_lut[i] - d, 2);
+                        dmin = dmin < c?dmin:c;
+                    }
+                }
+                return dmin;
+        }
+        inline u8 llr_round(float delta){
+            float llr = delta/N0;
+            int llr_int = (int)(127/(2*llr_max)* (llr_max + llr));
+            if(llr_int > 127)
+                llr_int = 127;
+            if (llr_int < 0)
+                llr_int = 0;
+            return (u8)llr_int;
+        }
+        inline u8 loc_index(float y){
+            int t = (int)(dim * (y + d_max)/(2.0f * d_max));
+            if (t >= dim)
+                t = dim - 1;
+            if (t < 0)
+                t = 0;
+            return (u8)(t);
+
         }
     };
-
     // pilot section
     struct gold{
         u32 x1, x2;
@@ -332,12 +387,13 @@ namespace soundlink{
     struct slotMapper:runnable{
         slotMapper(scheduler* sch, pipebuf<u8>& _in, pipebuf_c<float>& _grid, const link_cfg& _cfg):
         runnable(sch, "slotMapper"), cfg(_cfg), primary(0, _cfg.nRB),
-        secondary(1, _cfg.nRB), in(_in), grid(_grid, _cfg.nSC * _cfg.nSym){
+        secondary(1, _cfg.nRB), in(_in), grid(_grid, _cfg.nSC * _cfg.nSym),
+        maps{nullptr, mapBPSK, mapQPSK, nullptr, mapQAM16, nullptr, mapQAM64}{
             makePSS(pss);
         }
         void run() override{
             slot& sl = slot_number == 0? primary:secondary;
-            if(sl.capacity() > 8* in.readable() + mapper.available_bits ||
+            if(sl.capacity() > in.readable() ||
                 grid.writable() < cfg.nSC * cfg.nSym)
                 return;
             pss_fill(sl, pss, grid.wr_c());
@@ -345,10 +401,16 @@ namespace soundlink{
             /*
             management fill: TBD
             */
-           for(pRB& _rb: sl.rb_vec){
-            size_t consumed = mapper.fill(_rb, in.rd(), grid.wr_c());
-            in.read(consumed);
-           }
+           for (pRB& rb : sl.rb_vec) {
+                u8 bits = static_cast<u8>(rb.m);
+                u16 index;
+                u8 symbol;
+                cv32 g = grid.wr_c();
+                while (rb.nextData(index)) {
+                    in.read_bits(&symbol, bits);
+                    g[index] = maps[bits](symbol >> (8 - bits));
+                }
+            }
            slot_number = (++slot_number) % 5;
            if (slot_number == 0)
             pltGen.reset();
@@ -360,11 +422,11 @@ namespace soundlink{
         slot primary;
         slot secondary;
         u8 slot_number = 0;
-        modulator mapper;
         gold pltGen;
         cf32 pss[62];
-        pipereader<u8> in;
+        pipereader_bit in;
         pipewriter<float> grid;
+        mod_t maps[7];
         
     };
 
