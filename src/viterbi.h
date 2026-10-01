@@ -9,6 +9,7 @@
 #include "framework.h"
 #include "puncture.h"
 
+namespace soundlink{
 extern unsigned char d_Partab[];
 const int POLYA = 0x4f;
 const int POLYB = 0x6d;
@@ -38,7 +39,7 @@ enum code_rate {
         decisions |= uint64_t{1} << (2 * (i) + 1);       \
     }                                                    \
 }
-using namespace soundlink;
+
 class viterbi :runnable {
 private:
 	int cr[2] = {};
@@ -373,4 +374,5 @@ public:
         out.written(groups * denominator);
     }
 };
+}
 #endif

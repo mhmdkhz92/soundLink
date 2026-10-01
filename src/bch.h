@@ -7,6 +7,7 @@
 
 #include "framework.h"
 
+namespace soundlink{
 struct bch_config {
     int M, N, K, T;  // GF(2^M)
     uint16_t primitive; 
@@ -303,8 +304,6 @@ bool bch_decode(uint8_t* received, const bch_config& config) {
     return true;
 }
 
-using namespace soundlink;
-
 template<const bch_config& cfg>
 struct bch_encoder:runnable {
     bch_encoder(scheduler* sch, pipebuf<u8>& _in, pipebuf<u8>& _out):
@@ -366,5 +365,5 @@ private:
     pipewriter_bit out;
 };
 
-
+}
 #endif

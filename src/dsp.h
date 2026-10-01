@@ -4,77 +4,10 @@
 #include <cstring>
 #include "framework.h"
 #include "math.h"
+#include "filter.h"
 #include "physical_layer.h"
 
 namespace soundlink{
-
-    struct Kaiserparam{
-        float beta;
-        size_t numTaps;
-    };
-
-    inline void kaiserWin(float *y, Kaiserparam p){
-        float x = 0;
-        float *arg = new float[p.numTaps];
-        for (size_t i = 0; i < p.numTaps; ++i){
-            float t = std::pow(2 * x / (p.numTaps - 1) - 1, 2);
-            arg[i] = p.beta * std::sqrtf(1 - t);
-            x += 1;
-        }
-        besselI0(arg, y, p.numTaps);
-        delete[] arg;
-    }
-
-
-    inline Kaiserparam estimateKaiser(float attenuation_dB, float f_trans){
-        // Estimate beta.
-        float beta = 0.0f;
-
-        if (attenuation_dB > 50.0f)
-            beta = 0.1102f * (attenuation_dB - 8.7f);
-
-        else if (attenuation_dB >= 21.0f){
-            float a = attenuation_dB - 21.0f;
-            beta = 0.5842f * std::pow(a, 0.4f) + 0.07886f * a;
-        }
-        // Invalid transition width.
-        if (f_trans <= 0.0f || f_trans >= 0.5f){
-            return {beta, 0};
-        }
-        float deltaOmega = 2.0f * pi * f_trans;
-        float order = std::ceil((attenuation_dB - 8.0f)/(2.285f * deltaOmega));
-        if (order < 1.0f)
-            order = 1.0f;
-
-        size_t numTaps = static_cast<size_t>(order) + 1;
-
-        // An odd number gives the FIR filter a center sample.
-        if (numTaps % 2 == 0)
-            ++numTaps;
-
-        return {beta, numTaps};
-    }
-
-    inline void kaiserLpf(float* coefficients, float cutoff, Kaiserparam p){
-    kaiserWin(coefficients, p);
-
-    int center = static_cast<int>((p.numTaps - 1) / 2);
-    float sum = 0.0f;
-
-    for (size_t n = 0; n < p.numTaps; ++n) {
-        int m = static_cast<int>(n) - center;
-        float ideal;
-        if (m == 0)
-            ideal = 2.0f * cutoff;
-        else
-            ideal = std::sin(2.0f * pi * cutoff * m)/ (pi * m);
-        coefficients[n] *= ideal;
-        sum += coefficients[n];
-    }
-
-    // Unity gain at DC
-    scale(coefficients, 1/sum, p.numTaps);
-}
 
     // digital up converter runnable
     struct duc:runnable{
@@ -97,6 +30,7 @@ namespace soundlink{
             filter = new float[up*L_phase]{};
             kaiserLpf(h, cutoff, p);
             scale(h, (float)up, p.numTaps);
+
 
             phase = new float*[up];
             for(int i = 0; i < up; i++){
@@ -166,6 +100,112 @@ namespace soundlink{
         //mixer attributes
         int winsize = 48;
         float fc = 5e3;
+        trianglut lut;
+        int lut_idx;
+    };
+
+
+    // digital up converter runnable
+    struct ddc:runnable{
+    public:
+        ddc(scheduler *sch,  pipebuf<float> &_in, pipebuf_c<float> &_out, const link_cfg& _cfg)
+        :runnable(sch, "ddc"),in(_in), out(_out), cfg(_cfg),
+        lut(fc, _cfg.sr, 48u << static_cast<unsigned>(_cfg.bw)){
+            up = 1u << static_cast<unsigned>(cfg.bw); // 1, 2, 4, 8
+            down = 25;
+            filter_design();
+            lut_window = 48 * up;
+            lut_idx =0;
+        }
+        void filter_design(){
+            // filter design
+            delete[] re_filt;
+            delete[] im_filt;
+            const float cutoff = 0.5f / down;
+            const float transition = (1.0f - cfg.bandwidth / cfg.sr) / down;
+            // apply design and obtain taps
+            Kaiserparam p = estimateKaiser(60, transition);
+            L_phase = (p.numTaps + up - 1) / up;
+            float* h = new float[up*L_phase]{};
+            kaiserLpf(h, cutoff, p);
+            scale(h, (float)up, p.numTaps);
+            re_filt = new float[up*L_phase]{};
+            im_filt = new float[up*L_phase]{};
+            for(int i = 0; i < up; i++){
+                for(unsigned int j = 0; j < L_phase; ++j){
+                    re_filt[L_phase * (i + 1) - 1 - j] = 2*h[i + up * j]
+                    * std::cos(2 * pi * fc * (i + up * j)/(48e3*up));
+                    im_filt[L_phase * (i + 1) - 1 - j] = 2*h[i + up * j]
+                    * std::sin(2 * pi * fc * (i + up * j)/(48e3*up));     
+ 
+                }
+            }
+            delete[] h;
+        }
+        void run() override {
+            const float* rd = in.rd();
+            const size_t available = in.readable();
+            const size_t capacity = out.writable();
+            cv32 wr = out.wr_c();
+
+            const size_t required = std::max(
+                size_t(L_phase), size_t((down + up - 1) / up));
+
+            size_t consumed = 0;
+            size_t produced = 0;
+
+            while (available - consumed >= required && produced < capacity) {
+                const float* re_ph = re_filt + filter_phase * L_phase;
+                const float* im_ph = im_filt + filter_phase * L_phase;
+                const float* input = rd + consumed;
+                float re = 0.0f;
+                float im = 0.0f;
+                for (unsigned j = 0; j < L_phase; ++j) {
+                    const float re_h = re_ph[j];
+                    const float im_h = im_ph[j];
+                    re += input[j] * re_h;
+                    im += input[j] * im_h;
+                }
+                const float c = lut.cos[lut_idx];
+                const float s = lut.sin[lut_idx];
+                wr.re[produced] = re * c + im * s;
+                wr.im[produced++] = im * c - re * s;
+                filter_phase += down;
+                consumed += filter_phase / up;
+                filter_phase %= up;
+                if (++lut_idx == lut_window)
+                    lut_idx = 0;
+            }
+            in.read(consumed);
+            out.written(produced);
+        }
+        void set_fc(int fc_kHz) {
+            if (fc_kHz < 2 || fc_kHz > 18)
+                fail("wrong centre frequency was attempted");
+
+            fc = fc_kHz * 1000.0f;
+            filter_design();
+            lut.update(fc, cfg.sr);
+            lut_window = 48 * up;
+    }
+        ~ddc(){
+            delete[] re_filt; delete[] im_filt;
+        }
+    private:
+        pipereader<float> in;
+        pipewriter <float> out;
+
+        // resampler attributes
+        link_cfg cfg;
+        int up;
+        int down;
+        unsigned L_phase = 0;
+        unsigned filter_phase = 0;
+        float *re_filt = nullptr, *im_filt = nullptr;
+
+        //mixer attributes
+        float fc = 5e3;
+        int lut_window;
         trianglut lut;
         int lut_idx;
     };
