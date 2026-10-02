@@ -27,6 +27,23 @@ float dot_product(const float* __restrict a,
     return result;
 }
 
+void product_c(const cv32 __restrict a,
+    const cv32 __restrict b, cv32 __restrict c, unsigned N){
+        for(unsigned i = 0; i < N; ++i){
+            c.re[i] = a.re[i] * b.re[i] - a.im[i]*b.im[i];
+            c.im[i] = a.re[i] * b.im[i] + a.im[i]*b.re[i];
+        }
+}
+void product_c(cv32 __restrict a,
+    const cv32 __restrict b, unsigned N){
+        float re, im;
+        for(unsigned i = 0; i < N; ++i){
+            re = a.re[i] * b.re[i] - a.im[i]*b.im[i];
+            im = a.re[i] * b.im[i] + a.im[i]*b.re[i];
+            a.re[i] = re; a.im[i] = im;
+        }
+}
+
 template<typename T>
 inline T min(const T* a, size_t size) {
     T res = a[0];
@@ -82,7 +99,7 @@ struct fft_base {
 
 template<size_t N>
 struct fft:fft_base {
-    static_assert(N == 128 || N == 256 || N == 512 || N == 1024, "wrong length");
+    static_assert(N >= 2 && (N & (N - 1)) == 0, "FFT length must be a power of two >= 2");
 private:
     size_t bit_rev[N];
     alignas(64) float tw_re[N - 1];

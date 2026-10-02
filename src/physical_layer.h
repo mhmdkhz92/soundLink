@@ -352,7 +352,7 @@ inline void pilot_fill(slot& sl, gold& gen, cv32 grid) {
 // zadoff-chu 62 length sequence with root: 25
 inline void makePSS(cf32* out) {
     constexpr u8 root = 25;
-    constexpr float pi = 3.141592;
+    constexpr float pi = 3.14159265358979323846f;
 
     for (u8 n = 0; n < 62; ++n) {
         u8 k = (n < 31) ? n : n + 1;
