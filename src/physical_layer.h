@@ -53,15 +53,19 @@ struct link_cfg{
 // Abstraction of Physical Resource Blocks and slots
 static constexpr u8 plt_sc[6]  = {2, 6, 9, 3, 7, 10};
 static constexpr u8 plt_sym[6] = {1, 1, 1, 4, 4, 4};
+struct rx_stats{
+    float m2 = 0;
+    float m4 = 0;
+    float noise = 0.1f;
+};
 struct pRB{
-    modulation m;
-    float noise;
-    pRB(u16 _idx, u16 _nRB):m(modulation::QPSK), idx(_idx), nRB(_nRB){
+    const u16 idx;
+    modulation m = modulation::QPSK;
+    pRB(u16 _idx, u16 _nRB): idx(_idx), nRB(_nRB){
         for(size_t i = 0; i < 12*nSym; ++i)
             layout[i] = RE_type::D;
         for(size_t i = 0; i < 6; ++i)
             set_label(plt_sc[i], plt_sym[i], RE_type::plt);
-        noise = 1;
     }
     u16 operator()(u16 s, u16 t) const{
         return 12* (nRB  * t + idx) + s;
@@ -106,7 +110,6 @@ struct pRB{
         return dataRE_num * static_cast<u16>(m);
     }
 private:
-    const u16 idx;
     const u16 nRB;
     static const u16 nSym = NSYM_PER_RB;
     RE_type layout[12 * nSym];
@@ -346,6 +349,119 @@ inline void pilot_fill(slot& sl, gold& gen, cv32 grid) {
         }
     }
 }
+// equalizer and modulation master
+struct equalizer{
+public:
+    equalizer(const link_cfg cfg):
+    stats(cfg.nRB), h1(cfg.nSC), h4(cfg.nSC),
+    nRB(cfg.nRB){};
+
+    void process(slot& sl, cv32 grid){
+        u8 sltnmbr = sl.sltnmb;
+        if(!sltnmbr) refgen.reset();
+        if(sltnmbr && (sltnmbr - goldnmbr != 1)){
+            refgen.reset();
+            for (int i = 0; i < nRB * sltnmbr; ++i)
+                refgen.step();
+        }
+        
+        auto at = [nsc = 12 * nRB](size_t symbol, size_t sc) {
+            return symbol * nsc + sc;
+        };
+        // fill pilots - exact locations for h1 and h4
+        for (size_t rb = 0; rb < nRB; ++rb) {
+            u16 bits = refgen.step();
+            for (size_t p = 0; p < 6; ++p) {
+                const size_t sc = 12 * rb + plt_sc[p];
+                const cf32 reference = mapQPSK(bits & 3);
+                const cf32 received = grid[at(plt_sym[p], sc)];
+
+                auto& h = p < 3 ? h1 : h4;
+                h[sc] = received * std::conj(reference);
+                bits >>= 2;
+            }
+
+        }
+        // vertical interpolation for symbols 1 and 4
+        interp_v(h1, plt_sc);
+        interp_v(h4, plt_sc + 3);
+
+        // horizontal interpolation and appying to grid
+        cf32 tap = 0;
+        for (size_t sc = 0; sc < 12 * nRB; ++sc) {
+            cf32 c1 = h1[sc];
+            cf32 c4 = h4[sc];
+            
+            for (size_t symbol = 0; symbol < NSYM_PER_RB; ++symbol) {
+                float t = (float(symbol) - 1.0f) / 3.0f;
+                tap = c1 + t * (c4 - c1);
+                cf32 val = grid[at(symbol, sc)];
+                grid[at(symbol, sc)] = val/tap;
+            }
+        }
+        noise_update(sl, grid);
+        goldnmbr = sltnmbr;
+
+    }
+    float noise_val(int rb_idx){
+        return stats[rb_idx].noise;
+    }
+
+private:
+    std::vector<rx_stats> stats;
+    std::vector<cf32> h1, h4;
+    int nRB;
+    gold refgen;
+    u8 goldnmbr = 255;
+    void interp_v(std::vector<cf32>& h, const u8* positions){
+        int p = 0;
+        int down = positions[p++];
+        int up   = positions[p++];
+        auto freq = [nsc = h.size()](int sc) {
+            return sc + (sc >= int(nsc / 2));};
+        cf32 slope = (h[up]-h[down])/cf32(freq(up) - freq(down));
+        for (int sc = 0; sc < 12 * nRB; ++sc){
+            if (sc == up && p < 3 * nRB){
+                down = up;
+                up = positions[p % 3] + 12 * (p / 3);
+                ++p; slope = (h[up]-h[down])/cf32(freq(up) - freq(down));
+            }
+            cf32 temp = h[down] + slope * cf32(freq(sc) - freq(down)); 
+            h[sc] = temp;           
+        }
+    }
+    void noise_update(slot& sl, cv32 grid){
+        const float kappa[] = {0, 1, 1, 0, 1.32f, 0, 1.38095238f};
+        for (int i = 0;  i < sl.rb_vec.size(); ++i){
+            auto& rb = sl.rb_vec[i];
+            u16 index;
+            u16 c = rb.capacity() / static_cast<u16>(rb.m);
+            float m2 = 0, m4 = 0;
+            while(rb.nextData(index)){
+                float power = grid[index].re * grid[index].re + grid[index].im * grid[index].im;
+                m2 += power;
+                m4 += power * power;
+            }
+            m2 /=c;m4/=c;
+            if (!std::isfinite(m2) || !std::isfinite(m4))
+                continue;
+            if (stats[i].m2 == 0) stats[i].m2 = m2;
+            if (stats[i].m4 == 0) stats[i].m4 = m4;
+            stats[i].m2 = 0.8 * stats[i].m2 + 0.2 * m2;
+            stats[i].m4 = 0.8 * stats[i].m4 + 0.2 * m4;
+        
+            m2 = stats[i].m2;
+            m4 = stats[i].m4;
+            float d = 2.0f * m2 * m2 - m4;
+            if (d < 0.0f) continue;
+            int mod = static_cast<int>(rb.m);
+            float signal = std::sqrt(d / (2 - kappa[mod]));
+            if (m2 < signal) continue;
+            stats[i].noise = m2 - signal;
+        }
+        sl.reset();
+    }
+};
 
 // synchronization section
 
@@ -444,24 +560,29 @@ struct slot_demapper:runnable{
     primary(0, _cfg.nRB),
     secondary(1, _cfg.nRB),
     out(_out, int(22e3)),
-    grid(_grid)
+    grid(_grid), eq(_cfg)
     {}
     void run() override{
         slot& sl = slot_number == 0? primary:secondary;
+        sl.sltnmb = slot_number;
+        // capacity check
         if (grid.readable() < cfg.nSC * cfg.nSym ||
             sl.capacity() > out.writable())
             return;
 
-        /*
-        pilot extraction - ref slot filling and phase compensation
-        */
-        u16 index;
-        u8 llr_val[6];
+        
+        //pilot extraction - ref slot filling and phase compensation
         cv32 g = grid.rd_c();
+        eq.process(sl, g);
+
+        // soft demapping
+        u8 llr_val[6];
         u8* wr = out.wr();
         size_t consumed = 0;
+        u16 index;
         for (pRB& rb : sl.rb_vec) {
             u8 m = static_cast<u8>(rb.m);
+            llr.setN0(eq.noise_val(rb.idx));
             while (rb.nextData(index)) {
                 llr.eval(g[index], m, llr_val);
                 for (int w = 0; w < m; w++){
@@ -471,8 +592,6 @@ struct slot_demapper:runnable{
         }
         out.written(consumed);
         slot_number = (++slot_number) % 5;
-        if (slot_number == 0)
-        pltGen.reset();
         sl.reset();
         grid.read(cfg.nSC * cfg.nSym);
     }
@@ -484,13 +603,8 @@ private:
     u8 slot_number = 0;
     pipewriter<u8> out;
     pipereader<float> grid;
-    gold pltGen;
+    equalizer eq;
     LLRtab llr;
-
-
 };
-
-
-
 }
 #endif //SOUNDLINK_PHYSICAL_LAYER_H

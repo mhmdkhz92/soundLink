@@ -266,6 +266,7 @@ private:
 
 };
 struct timesync{
+    static constexpr size_t window = 4096;
     timesync(const link_cfg& cfg, const fft_base& symbol_fft):
     pss{new float[window]{}, new float[window]{}},
     corr{new float[window]{}, new float[window]{}}{
@@ -287,14 +288,13 @@ struct timesync{
         }
         npss = cfg.nFFT;
         pssEnergy /= window;
-        th = 62.0f / (cfg.nSC - 10.0f + cfg.nFFT); // empirical number
+        th = 62.0f / (cfg.nSC - 10.0f + cfg.nFFT); // empirical formula
     }
     ~timesync(){
         delete[] pss.re;delete[] pss.im;
         delete[] corr.re;delete[] corr.im;
     }
     int sync(cv32 sig, size_t n){
-        if(n < npss) return -1;
         // fill correlation container
         size_t m = std::min(n, window);
         size_t valid = m - npss + 1;
@@ -330,14 +330,55 @@ struct timesync{
         return -1;
     }
 private:
-    static constexpr size_t window = 4096;
     float th;
     fft<window> fft_engine;
     cv32 pss;
     cv32 corr;
     size_t npss;
     float pssEnergy;
-    
+};
+struct freqsync{
+    freqsync(const link_cfg& cfg):
+    osc(1), fr(0),nfft(cfg.nFFT), cp(cfg.cp), sr(cfg.sr){
+        timer = 0;
+        step = 1;
+    };
+    void freq_est(cv32 ofdm){
+        float re = 0;
+        float im = 0;
+        float* re_ofdm = ofdm.re;
+        float* im_ofdm = ofdm.im;
+        for (int i = 0; i < cp; ++i){
+            re += re_ofdm[i] * re_ofdm[i + nfft] + im_ofdm[i] * im_ofdm[i + nfft];
+            im += -re_ofdm[i] * im_ofdm[i + nfft] + im_ofdm[i] * re_ofdm[i + nfft];
+        }
+        float arg = std::arg(cf32(re, im));
+        float _fr = -15.0f * arg/(2*pi);
+        if (fr == 0) fr = _fr;
+        fr = 0.8 * fr + 0.2 * _fr;
+        float angle = -2 * pi * fr / sr;
+        step = cf32(std::cos(angle), std::sin(angle));
+        osc /= std::abs(osc);
+    }
+    void sync(cv32 ofdm){
+        if (timer++ == 0) freq_est(ofdm);
+        timer &= 0x03;
+        float re, im;
+        float* re_ofdm = ofdm.re;
+        float* im_ofdm = ofdm.im;
+        for(int i = 0; i < cp + nfft; ++i){
+            re = re_ofdm[i] * osc.real() - im_ofdm[i] * osc.imag();
+            im = im_ofdm[i] * osc.real() + re_ofdm[i] * osc.imag();
+            re_ofdm[i] = re; im_ofdm[i] = im;
+            osc *= step;           
+        }
+    }
+private:
+    cf32 osc, step;
+    float fr;
+    float sr;
+    int nfft, cp;
+    int timer = 0;
 };
 struct ofdm_demodulator: runnable{
     ofdm_demodulator(scheduler *sch, pipebuf_c<float> &_in,
@@ -347,11 +388,26 @@ struct ofdm_demodulator: runnable{
         fft_engines[0] = new fft<128>();fft_engines[1] = new fft<256>();
         fft_engines[2] = new fft<512>();fft_engines[3] = new fft<1024>();
 
-        buffer_re = new float[cfg.nFFT];
-        buffer_im = new float[cfg.nFFT];
+        buffer_re = new float[cfg.nFFT + cfg.cp];
+        buffer_im = new float[cfg.nFFT + cfg.cp];
+        size_t fft_index = static_cast<size_t>(cfg.bw);
+        tsync = new timesync(_cfg, *fft_engines[fft_index]);
+        fsync = new freqsync(_cfg);
     }
 
     void run() override{
+        while (!sync) {
+            if (in.readable() < cfg.cp + cfg.nFFT)
+                return;
+            int searched = std::min(in.readable() - cfg.cp, tsync->window);
+            int t = tsync->sync(in.rd_c() + cfg.cp, searched);
+            if (t == -1) {
+                in.read(searched - cfg.nFFT + 1);
+                continue;
+            }
+            in.read((size_t)t);
+            sync = true;
+        }
         if(in.readable() < (cfg.nFFT + cfg.cp) * cfg.nSym ||
         out.writable() < cfg.nSC * cfg.nSym)
             return;
@@ -359,22 +415,24 @@ struct ofdm_demodulator: runnable{
         cv32 symin = in.rd_c();
         cv32 symout = out.wr_c();
 
-        size_t in_offset = cfg.nFFT - cfg.nSC/2;
+
+        size_t in_offset = cfg.nFFT + cfg.cp - cfg.nSC/2;
         size_t out_offset = cfg.nSC/2;
         size_t fft_index = static_cast<size_t>(cfg.bw);
         size_t sym_index = 0;
 
         while(sym_index < cfg.nSym){
-            std::memcpy(buffer_re, symin.re + cfg.cp, sizeof(float) * cfg.nFFT);
-            std::memcpy(buffer_im, symin.im + cfg.cp, sizeof(float) * cfg.nFFT);
+            std::memcpy(buffer_re, symin.re, sizeof(float) * (cfg.cp+cfg.nFFT));
+            std::memcpy(buffer_im, symin.im, sizeof(float) * (cfg.cp+cfg.nFFT));
 
-            fft_engines[fft_index]->forward(cv32{buffer_re, buffer_im});
+            fsync->sync(cv32{buffer_re, buffer_im});
+            fft_engines[fft_index]->forward(cv32{buffer_re + cfg.cp, buffer_im + cfg.cp});
 
             for(size_t i = 0; i < cfg.nSC/2; ++i){
                 symout.re[i] = buffer_re[in_offset + i];
                 symout.im[i] = buffer_im[in_offset + i];
-                symout.re[out_offset + i] = buffer_re[1 + i];
-                symout.im[out_offset + i] = buffer_im[1 + i];
+                symout.re[out_offset + i] = buffer_re[cfg.cp + 1 + i];
+                symout.im[out_offset + i] = buffer_im[cfg.cp + 1 + i];
             }
 
             symin += cfg.nFFT + cfg.cp;
@@ -393,6 +451,8 @@ struct ofdm_demodulator: runnable{
         delete fft_engines[3];
         delete[] buffer_re;
         delete[] buffer_im;
+        delete tsync;
+        delete fsync;
     }
 
 private:
@@ -402,6 +462,9 @@ private:
     pipewriter<float> out;
     float* buffer_re;
     float* buffer_im;
+    timesync* tsync;
+    freqsync* fsync;
+    bool sync = false;
 };
 }
 
