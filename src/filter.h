@@ -36,7 +36,8 @@ namespace soundlink{
         float x = 0;
         float *arg = new float[p.numTaps];
         for (size_t i = 0; i < p.numTaps; ++i){
-            float t = std::pow(2 * x / (p.numTaps - 1) - 1, 2);
+            const float position = 2.0f * x / (float)(p.numTaps - 1) - 1.0f;
+            float t = position * position;
             arg[i] = p.beta * std::sqrt(1 - t);
             x += 1;
         }
@@ -84,7 +85,7 @@ namespace soundlink{
             if (m == 0)
                 ideal = 2.0f * cutoff;
             else
-                ideal = std::sin(2.0f * pi * cutoff * m)/ (pi * m);
+                ideal = std::sin(2.0f * pi * cutoff * (float)m)/ (pi * (float)m);
             coefficients[n] *= ideal;
             sum += coefficients[n];
         }

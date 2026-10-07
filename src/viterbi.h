@@ -13,7 +13,7 @@ namespace soundlink{
 extern unsigned char d_Partab[];
 const int POLYA = 0x4f;
 const int POLYB = 0x6d;
-typedef int (*punc_t)(const u8*, u8*, uint16_t&);
+typedef size_t (*punc_t)(const u8*, u8*, uint16_t&);
 enum code_rate {
 	FEC12, FEC23, FEC34, FEC56, FEC78,
 };
@@ -42,7 +42,7 @@ enum code_rate {
 
 class viterbi :runnable {
 private:
-	int cr[2] = {};
+	size_t cr[2] = {};
 	code_rate crate;
 	uint32_t state0[64] = {};
 	uint32_t state1[64] = {};
@@ -82,7 +82,7 @@ private:
 		int i;
 		while (nbytes-- != 0) {
 			for (i = 7;i >= 0;i--) {
-				encstate = (encstate << 1) | ((*data >> i) & 1);
+				encstate = (u8)(encstate << 1) | ((*data >> i) & 1);
 				*symbols++ = d_Partab[encstate & POLYA];
 				*symbols++ = d_Partab[encstate & POLYB];
 			}
@@ -92,28 +92,28 @@ private:
 	}
 	inline void decode(u8* output_buffer) {
 
-		int mets[4];
+		uint32_t mets[4];
 		for (int bitcnt = 0; bitcnt < INPUT_BUFFER; bitcnt += 2) {
-			u8 A = input_buffer[bitcnt];
-			u8 B = input_buffer[bitcnt + 1];
+			uint32_t A = input_buffer[bitcnt];
+			uint32_t B = input_buffer[bitcnt + 1];
 			if (A>>7&1){
 				mets[0] = B;          
-				mets[1] = (127 - B); 
+				mets[1] = (127u - B); 
 				mets[2] = B;         
-				mets[3] = (127 - B);
+				mets[3] = (127u - B);
 			}
 			else if (B>>7&1){
 				mets[0] = A;
 				mets[1] = A;
-				mets[2] = (127 - A);
-				mets[3] = (127 - A);
+				mets[2] = (127u - A);
+				mets[3] = (127u - A);
 
 			}
 			else{
 				mets[0] = A + B;          		  // expected 00
-				mets[1] = A + (127 - B);  		  // expected 01
-				mets[2] = (127 - A) + B;          // expected 10
-				mets[3] = (127 - A) + (127 - B);  // expected 11
+				mets[1] = A + (127u - B);  		  // expected 01
+				mets[2] = (127u - A) + B;          // expected 10
+				mets[3] = (127u - A) + (127u - B);  // expected 11
 			}
 			// ACS butterfly 
 			uint64_t decisions = 0;
@@ -145,23 +145,23 @@ private:
 			if (state[i] < state[tr_state])
 				tr_state = static_cast<uint8_t>(i);
 		//convergence phase
-		for (int t = 0; t < TRACEBACK; ++t) {
+		for (uint32_t t = 0; t < TRACEBACK; ++t) {
 			uint32_t ring_index = (start_idx - t) & (BUFFER_LEN - 1);
 			uint64_t stage_decisions = trace_buffer[ring_index];
 
 			uint64_t D = (stage_decisions >> tr_state) & 1;
-			tr_state = (tr_state >> 1) | (D << 5);
+			tr_state = (uint8_t)((tr_state >> 1) | (D << 5));
 		}
 
 		// collect phase
-		for (int t = TRACEBACK; t < BUFFER_LEN; ++t) {
+			for (uint32_t t = TRACEBACK; t < BUFFER_LEN; ++t) {
 			uint32_t ring_index = (start_idx - t) & (BUFFER_LEN - 1);
 			uint64_t stage_decisions = trace_buffer[ring_index];
 
 			uint64_t D = (stage_decisions >> tr_state) & 1;
 
-			acc = (acc >> 1) | ((tr_state & 1) << 7);
-			tr_state = (tr_state >> 1) | (D << 5);
+				acc = (uint8_t)((acc >> 1) | ((tr_state & 1) << 7));
+			tr_state = (uint8_t)((tr_state >> 1) | (D << 5));
 
 			if ((t & 7) == 7) {
 				decoded_bytes[out_idx] = acc;
@@ -181,12 +181,12 @@ private:
 		float BER[4] = {};
 		u8* dec_hyp = new u8[output_write];
 		u8* enc_hyp = new u8[2 * 8 * output_write];
-		for (int i = 0; i < punc_phase_num; ++i) {
+		for (size_t i = 0; i < punc_phase_num; ++i) {
         	decoder_reset();
-			uint32_t idx_out = 0;
-			uint32_t idx_in = 2 * i;
+			size_t idx_out = 0;
+			size_t idx_in = 2 * i;
 
-			int iter = cr[0] * lim;
+			size_t iter = cr[0] * lim;
 
 			while (iter > 1) {
 				idx_in += puncturer(pin + idx_in, input_buffer, punc_offset);
@@ -200,19 +200,19 @@ private:
 			// Compare hypothesis against received data
 			uint32_t ber = 0;
 			idx_in = 2 * i;
-			for (int j = 0; j < 2 * 8 * idx_out - 4 * TRACEBACK; j += 2 * cr[0]) {
-				for (int k = 0; k < 2 * cr[0]; ++k) {
+			for (size_t j = 0; j < 2 * 8 * idx_out - 4 * TRACEBACK; j += 2 * cr[0]) {
+				for (size_t k = 0; k < 2 * cr[0]; ++k) {
 					if (patterns[crate][k]) {
 						ber += enc_hyp[j + k] != (u8)(pin[idx_in++] > 63);
 					}
 				}
 			}
-        	BER[i] = (float)ber / (idx_in - 2 * i);
+        	BER[i] = (float)ber / (float)(idx_in - 2 * i);
     	}
 
 		// Find puncturing phase with minimum BER
 		uint8_t argmin = 0;
-		for (int i = 1; i < punc_phase_num; ++i) {
+		for (uint8_t i = 1; i < punc_phase_num; ++i) {
 			if (BER[i] < BER[argmin])
 				argmin = i;
 		}
@@ -234,7 +234,7 @@ private:
 public:
 	viterbi(scheduler* sch, pipebuf<u8>& _in,
 		pipebuf<u8>& _out, code_rate r) :runnable(sch, "VITERBI_S"),
-		out(_out), in(_in), crate(r)
+		crate(r), out(_out), in(_in)
 	{
 		switch (r) {
 		case FEC12:
@@ -285,7 +285,7 @@ public:
 
 		u8* pin = reinterpret_cast<u8*>(in.rd());
 		while (iter > 0) {
-			int r = puncturer(pin, input_buffer, punc_offset);
+			size_t r = puncturer(pin, input_buffer, punc_offset);
 			decode(out.wr());
 
 			if (skip_flag){

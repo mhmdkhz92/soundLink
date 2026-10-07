@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <complex>
+#include <cstddef>
 #include <math.h>
 
 namespace soundlink{
@@ -29,7 +30,7 @@ typedef uint8_t u8;
 typedef std::complex<float> cf32;
 
 struct pipebuf_common{
-    virtual long long hash() = 0;
+    virtual uint64_t hash() = 0;
     const char *name;
     pipebuf_common(const char *_name) : name(_name){}
 };
@@ -64,10 +65,10 @@ struct scheduler{
             runnables[i]->run();
     }
     void run(){
-        unsigned long long prev_hash = 0;
+        uint64_t prev_hash = 0;
         while (1){
             step();
-            unsigned long long h = hash();
+            uint64_t h = hash();
             if ( h == prev_hash ) break;
             prev_hash = h;
         }
@@ -77,10 +78,10 @@ struct scheduler{
     for ( int i=0; i<nrunnables; ++i )
     runnables[i]->shutdown();
     }
-    unsigned long long hash(){
-    unsigned long long h = 0;
+    uint64_t hash(){
+    uint64_t h = 0;
     for ( int i=0; i<npipes; ++i )
-        h += (1+i)*pipes[i]->hash();
+        h += (uint64_t)(1+i)*pipes[i]->hash();
     return h;
     }
 };
@@ -100,13 +101,13 @@ struct pipebuf : pipebuf_common {
     int nrd;
     T *wr;
     T *end;
-    pipebuf(scheduler *sch, const char *name, unsigned long size): pipebuf_common(name),
+    pipebuf(scheduler *sch, const char *name, size_t size): pipebuf_common(name),
         re(new T[size]), nrd(0), wr(re), end(re+size),
         min_write(1), total_written(0), total_read(0) {
         sch->add_pipe(this);
     }
     // constructor for complex buffers
-    pipebuf(const char *name, unsigned long size): pipebuf_common(name),
+    pipebuf(const char *name, size_t size): pipebuf_common(name),
         re(new T[size]), nrd(0), wr(re), end(re+size),
         min_write(1), total_written(0), total_read(0) {
         im = new T[size];
@@ -122,28 +123,29 @@ struct pipebuf : pipebuf_common {
         for ( int i=0; i<nrd; ++i )
             if ( rds[i] < rd )
                 rd = rds[i];
-        memmove(re, rd, (wr-rd)*sizeof(T));
+        const size_t retained = (size_t)(wr - rd);
+        memmove(re, rd, retained * sizeof(T));
         if(im){
-            memmove(im, im + (rd - re), (wr-rd)*sizeof(T));
+            memmove(im, im + (rd - re), retained * sizeof(T));
         }
         wr -= rd - re;
         for ( int i=0; i<nrd; ++i ) 
             rds[i] -= rd - re;
     }
-    long long hash() {
+    uint64_t hash() {
         return total_written + total_read;
     }
     ~pipebuf() {
         delete[] re;
         delete[] im;
     }
-    unsigned long min_write;
-    unsigned long total_written, total_read;
+    size_t min_write;
+    uint64_t total_written, total_read;
 };
 
 template<typename T>
 struct pipebuf_c:pipebuf<T>{
-    pipebuf_c(scheduler* sch, const char *name, unsigned long size):
+    pipebuf_c(scheduler* sch, const char *name, size_t size):
     pipebuf<T>(name, size){
         sch->add_pipe(this);
     }
@@ -179,7 +181,7 @@ template<typename T>
 struct complex_view {
     T* re;
     T* im;
-    complex_ref<T> operator[](unsigned long i) const {
+    complex_ref<T> operator[](size_t i) const {
         return {re[i], im[i]};
     }
     complex_ref<T> operator*() const {
@@ -199,15 +201,15 @@ struct complex_view {
 template<typename T>
 struct pipewriter {
     pipebuf<T> &buf;
-    pipewriter(pipebuf<T> &_buf, unsigned long min_write=1):buf(_buf){
+    pipewriter(pipebuf<T> &_buf, size_t min_write=1):buf(_buf){
     if ( min_write > buf.min_write ) 
         buf.min_write = min_write;
     }
     // Return number of items writable at this->wr, 0 if full.
-    unsigned long writable() {
-        if ( buf.end-buf.wr < buf.min_write ) 
+    size_t writable() {
+        if ( (size_t)(buf.end - buf.wr) < buf.min_write ) 
             buf.pack();
-        return buf.end - buf.wr;
+        return (size_t)(buf.end - buf.wr);
     }
     T *wr(){
         return buf.wr;
@@ -217,8 +219,8 @@ struct pipewriter {
             fail("complex op on scalar buffer");
         return{buf.wr, buf.im + (buf.wr - buf.re)};
     }
-    void written(unsigned long n) {
-        if ( buf.wr+n > buf.end ) {
+    void written(size_t n) {
+        if ( n > (size_t)(buf.end - buf.wr) ) {
                 fprintf(stderr, "Bug: overflow to %s\n", buf.name);
                 exit(1);
         }
@@ -244,8 +246,8 @@ struct pipereader {
     pipebuf<T> &buf;
     int id;
     pipereader(pipebuf<T> &_buf) : buf(_buf), id(_buf.add_reader()) { }
-    unsigned long readable(){
-        return buf.wr - buf.rds[id];
+    size_t readable(){
+        return (size_t)(buf.wr - buf.rds[id]);
     }
     T* rd(){
         return buf.rds[id];
@@ -255,8 +257,8 @@ struct pipereader {
             fail("complex op on scalar buffer");
         return{buf.rds[id], buf.im + (buf.rds[id] - buf.re)};
     }
-    void read(unsigned long n) {
-        if ( buf.rds[id]+n > buf.wr ) {
+    void read(size_t n) {
+        if ( n > (size_t)(buf.wr - buf.rds[id]) ) {
             fprintf(stderr, "Bug: underflow from %s\n", buf.name);
             exit(1);
         }
@@ -272,13 +274,13 @@ struct pipereader_bit{
         held = 0;
         nheld = 0;
     }
-    unsigned long readable(){
-        return 8 * (buf.wr - buf.rds[id]) + nheld;
+    size_t readable(){
+        return 8 * (size_t)(buf.wr - buf.rds[id]) + nheld;
     }
     void read_bits(u8* destination, unsigned nbits){
         if (nbits == 0)
             return;
-        unsigned count = 0;
+        size_t count = 0;
         while(nbits>= 8){
             if(nheld < 8)
                 fill_held();
@@ -289,23 +291,23 @@ struct pipereader_bit{
         if(nbits){
             if(nheld < nbits)
                 fill_held();
-            destination[count] = (held >> (nheld - nbits)) & ((1u << nbits) - 1);
+            destination[count] = (u8)((held >> (nheld - nbits)) & ((1u << nbits) - 1));
             destination[count] <<= (8 - nbits);
             nheld -= nbits;
         }
     }
     void fill_held(){
-        unsigned bytes = (buf.wr - buf.rds[id]);
+        size_t bytes = (size_t)(buf.wr - buf.rds[id]);
         if (bytes > 7)
             bytes = 7;
         const u8* rd = buf.rds[id];
-        for (unsigned i = 0; i < bytes; ++i)
+        for (size_t i = 0; i < bytes; ++i)
             held = (held << 8) | uint64_t{rd[i]};
         nheld += bytes * 8;
         read(bytes);
     }
-    void read(unsigned long n) {
-        if ( buf.rds[id]+n > buf.wr ) {
+    void read(size_t n) {
+        if ( n > (size_t)(buf.wr - buf.rds[id]) ) {
             fprintf(stderr, "Bug: underflow from %s\n", buf.name);
             exit(1);
         }
@@ -316,30 +318,31 @@ struct pipereader_bit{
 
 private:
     uint64_t held;
-    unsigned nheld;
+    size_t nheld;
 };
 
 struct pipewriter_bit{
     pipebuf<u8>& buf;
 
-    pipewriter_bit(pipebuf<u8> &_buf, unsigned min_write = 1):buf(_buf){
-    if ( min_write > buf.min_write) 
+    pipewriter_bit(pipebuf<u8> &_buf, size_t min_write = 1):buf(_buf){
+    if ( min_write > buf.min_write) {
         buf.min_write = min_write;
+    }
         held = 0;
         nheld = 0;
     }
-    unsigned writable(){
-        if ( buf.end-buf.wr < buf.min_write) 
+    size_t writable(){
+        if ( (size_t)(buf.end - buf.wr) < buf.min_write) 
             buf.pack();
-        unsigned capacity = 8* (buf.end - buf.wr);
+        const size_t capacity = 8 * (size_t)(buf.end - buf.wr);
         return capacity >= nheld ? capacity - nheld : 0;
     }
     void write(u8* src, unsigned nbits){
-        unsigned count = 0;
+        size_t count = 0;
         unsigned width = 0;
         while(nbits){
             width = nbits < 8 ? nbits: 8;
-            held = (held << width) | (src[count ++] >> (8 - width));
+            held = (uint16_t)((held << width) | (src[count ++] >> (8 - width)));
             nheld += width;
             nbits -= width;
             if(nheld >> 3){
@@ -351,8 +354,8 @@ struct pipewriter_bit{
 
     }
 
-    void written(unsigned long n) {
-        if ( buf.wr+n > buf.end ) {
+    void written(size_t n) {
+        if ( n > (size_t)(buf.end - buf.wr) ) {
                 fprintf(stderr, "Bug: overflow to %s\n", buf.name);
                 exit(1);
         }
@@ -362,7 +365,7 @@ struct pipewriter_bit{
 
 private:
     uint16_t held;
-    unsigned nheld;
+    size_t nheld;
 };
 }
 #endif  

@@ -43,16 +43,17 @@ struct file_reader : runnable {
     }
 
     // Always stop at element boundary (may block)
-    size_t partial = nr % sizeof(T);
+    size_t bytes_read = (size_t)nr;
+    size_t partial = bytes_read % sizeof(T);
     size_t remain = partial ? sizeof(T)-partial : 0;
     while ( remain ) {
-      ssize_t nr2 = read(fdin, (char*)out.wr()+nr, remain);
+      ssize_t nr2 = read(fdin, (char*)out.wr()+bytes_read, remain);
       if ( nr2 <= 0 ) fatal("partial read");
-      nr += nr2;
-      remain -= nr2;
+      bytes_read += (size_t)nr2;
+      remain -= (size_t)nr2;
     }
 
-    out.written(nr / sizeof(T));
+    out.written(bytes_read / sizeof(T));
   }
   bool loop;
   void set_realtime(T &_filler) {
@@ -75,13 +76,14 @@ struct file_writer : runnable {
     in(_in), fdout(_fdout) {
   }
   void run() {
-    int size = in.readable() * sizeof(T);
+    size_t size = in.readable() * sizeof(T);
     if ( ! size ) return;
-    int nw = write(fdout, in.rd(), size);
+    ssize_t nw = write(fdout, in.rd(), size);
     if ( ! nw ) fatal("pipe");
     if ( nw < 0 ) fatal("write");
-    if ( nw % sizeof(T) ) fatal("partial write");
-    in.read(nw/sizeof(T));
+    const size_t bytes_written = (size_t)nw;
+    if ( bytes_written % sizeof(T) ) fatal("partial write");
+    in.read(bytes_written/sizeof(T));
   }
 private:
   pipereader<T> in;

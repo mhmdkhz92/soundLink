@@ -247,7 +247,7 @@ struct LLRtab{
     }
 private:
     float llr_max = 6.0f;
-    float d_max = 1.2;
+    float d_max = 1.2f;
     static constexpr int dim = 64;
     float N0 = 1;
     float bpsk[dim];
@@ -279,10 +279,10 @@ private:
     }
     float dmin(float d, const float* pam_lut, int lut_size,
         int loc, bool bit){
-            float dmin = std::pow(2*d_max, 2);
+            float dmin = (2.0f * d_max) * (2.0f * d_max);
             for (int i = 0; i < lut_size; ++i){
                 if(bool(i & (lut_size >> (loc + 1))) == bit){
-                    float c = std::pow(pam_lut[i] - d, 2);
+                    float c = (pam_lut[i] - d)*(pam_lut[i] - d);
                     dmin = dmin < c?dmin:c;
                 }
             }
@@ -357,11 +357,11 @@ public:
     nRB(cfg.nRB){};
 
     void process(slot& sl, cv32 grid){
-        u8 sltnmbr = sl.sltnmb;
+        u16 sltnmbr = sl.sltnmb;
         if(!sltnmbr) refgen.reset();
         if(sltnmbr && (sltnmbr - goldnmbr != 1)){
             refgen.reset();
-            for (int i = 0; i < nRB * sltnmbr; ++i)
+            for (size_t i = 0; i < nRB * sltnmbr; ++i)
                 refgen.step();
         }
         
@@ -403,24 +403,24 @@ public:
         goldnmbr = sltnmbr;
 
     }
-    float noise_val(int rb_idx){
+    float noise_val(u16 rb_idx){
         return stats[rb_idx].noise;
     }
 
 private:
     std::vector<rx_stats> stats;
     std::vector<cf32> h1, h4;
-    int nRB;
+    size_t nRB;
     gold refgen;
-    u8 goldnmbr = 255;
+    u16 goldnmbr = 255;
     void interp_v(std::vector<cf32>& h, const u8* positions){
-        int p = 0;
-        int down = positions[p++];
-        int up   = positions[p++];
-        auto freq = [nsc = h.size()](int sc) {
-            return sc + (sc >= int(nsc / 2));};
+        size_t p = 0;
+        size_t down = positions[p++];
+        size_t up   = positions[p++];
+        auto freq = [nsc = h.size()](size_t sc) {
+            return (float)sc + (sc >= nsc / 2 ? 1.0f : 0.0f);};
         cf32 slope = (h[up]-h[down])/cf32(freq(up) - freq(down));
-        for (int sc = 0; sc < 12 * nRB; ++sc){
+        for (size_t sc = 0; sc < 12 * nRB; ++sc){
             if (sc == up && p < 3 * nRB){
                 down = up;
                 up = positions[p % 3] + 12 * (p / 3);
@@ -432,7 +432,7 @@ private:
     }
     void noise_update(slot& sl, cv32 grid){
         const float kappa[] = {0, 1, 1, 0, 1.32f, 0, 1.38095238f};
-        for (int i = 0;  i < sl.rb_vec.size(); ++i){
+        for (size_t i = 0;  i < sl.rb_vec.size(); ++i){
             auto& rb = sl.rb_vec[i];
             u16 index;
             u16 c = rb.capacity() / static_cast<u16>(rb.m);
@@ -447,8 +447,8 @@ private:
                 continue;
             if (stats[i].m2 == 0) stats[i].m2 = m2;
             if (stats[i].m4 == 0) stats[i].m4 = m4;
-            stats[i].m2 = 0.8 * stats[i].m2 + 0.2 * m2;
-            stats[i].m4 = 0.8 * stats[i].m4 + 0.2 * m4;
+            stats[i].m2 = 0.8f * stats[i].m2 + 0.2f * m2;
+            stats[i].m4 = 0.8f * stats[i].m4 + 0.2f * m4;
         
             m2 = stats[i].m2;
             m4 = stats[i].m4;
@@ -468,11 +468,9 @@ private:
 // zadoff-chu 62 length sequence with root: 25
 inline void makePSS(cf32* out) {
     constexpr u8 root = 25;
-    constexpr float pi = 3.14159265358979323846f;
-
     for (u8 n = 0; n < 62; ++n) {
         u8 k = (n < 31) ? n : n + 1;
-        float phase = -pi * root * k * (k + 1) / 63.0;
+        float phase = -pi * root * k * (k + 1) / 63.0f;
 
         out[n] = cf32(std::cos(phase), std::sin(phase));
     }
@@ -481,8 +479,8 @@ inline void pss_fill(slot& sl, const cf32* pss, cv32 grid) {
     if (sl.sltnmb != 0)
         return;
 
-    u16 nRB = sl.rb_vec.size();
-    u16 first = (nRB * 12 - 72) / 2;
+    size_t nRB = sl.rb_vec.size();
+    u16 first = u16((nRB * 12 - 72) / 2);
 
     for (u8 i = 0; i < 72; ++i) {
         u16 k = first + i;

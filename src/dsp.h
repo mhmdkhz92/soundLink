@@ -14,29 +14,29 @@ struct duc:runnable{
 public:
     duc(scheduler *sch,  pipebuf_c<float> &_in, pipebuf<float> &_out, const link_cfg& cfg)
     :runnable(sch, "duc"),
-    in(_in), out(_out), lut(fc, 48e3, winsize), lut_idx(0){
+    in(_in), out(_out), lut_idx(0), lut(fc, 48e3, winsize){
 
         up = 25;
         down = 1u << static_cast<unsigned>(cfg.bw); // 1, 2, 4, 8
         // filter design
-        const float cutoff = 0.5f / up;
-        const float transition = (1.0f - cfg.bandwidth / cfg.sr) / up;
+        const float cutoff = 0.5f / static_cast<float>(up);
+        const float transition = (1.0f - cfg.bandwidth / cfg.sr) / static_cast<float>(up);
 
         // apply design and obtain taps
         Kaiserparam p = estimateKaiser(60, transition);
-        L_phase = (p.numTaps + up - 1) / up;
+        phaseLen = (p.numTaps + up - 1) / up;
 
-        float* h = new float[up*L_phase]{};
-        filter = new float[up*L_phase]{};
+        float* h = new float[up*phaseLen]{};
+        filter = new float[up*phaseLen]{};
         kaiserLpf(h, cutoff, p);
         scale(h, (float)up, p.numTaps);
 
 
         phase = new float*[up];
-        for(int i = 0; i < up; i++){
-            phase[i] = filter + (i* L_phase);
-            for(unsigned int j = 0; j < L_phase; ++j){
-                filter[L_phase * (i + 1) - 1 - j] = h[i + up * j];
+        for(size_t i = 0; i < up; i++){
+            phase[i] = filter + (i* phaseLen);
+            for(size_t j = 0; j < phaseLen; ++j){
+                filter[phaseLen * (i + 1) - 1 - j] = h[i + up * j];
             }
         }
         delete[] h;
@@ -47,8 +47,7 @@ public:
         const size_t capacity = out.writable();
         float* wr = out.wr();
 
-        const size_t required = std::max(
-            size_t(L_phase), size_t((down + up - 1) / up));
+        const size_t required = std::max(phaseLen, (down + up - 1) / up);
 
         size_t consumed = 0;
         size_t produced = 0;
@@ -59,7 +58,7 @@ public:
             const float* input_im = rd.im + consumed;
             float re = 0.0f;
             float im = 0.0f;
-            for (unsigned j = 0; j < L_phase; ++j) {
+            for (size_t j = 0; j < phaseLen; ++j) {
                 const float h = ph[j];
                 re += input_re[j] * h;
                 im += input_im[j] * h;
@@ -78,7 +77,7 @@ public:
         if (fc_kHz < 2 || fc_kHz > 18)
             fail("wrong centre frequency was attempted");
 
-        fc = fc_kHz * 1000.0f;
+        fc = static_cast<float>(fc_kHz) * 1000.0f;
         lut.update(fc, 48000.0f);
 }
     ~duc(){
@@ -90,18 +89,18 @@ private:
     pipewriter <float> out;
 
     // resampler attributes
-    int up;
-    int down;
-    float* filter = nullptr;
-    unsigned L_phase = 0;
-    unsigned filter_phase = 0;
+    size_t up;
+    size_t down;
+    size_t phaseLen = 0;
+    size_t filter_phase = 0;
     float** phase = nullptr;
+    float* filter = nullptr;
 
     //mixer attributes
-    int winsize = 48;
+    static constexpr size_t winsize = 48;
+    size_t lut_idx;
     float fc = 5e3;
     trianglut lut;
-    int lut_idx;
 };
 
 
@@ -121,22 +120,21 @@ public:
         // filter design
         delete[] re_filt;
         delete[] im_filt;
-        const float cutoff = 0.5f / down;
-        const float transition = (1.0f - cfg.bandwidth / cfg.sr) / down;
+        const float cutoff = 0.5f / static_cast<float>(down);
+        const float transition = (1.0f - cfg.bandwidth / cfg.sr) / static_cast<float>(down);
         // apply design and obtain taps
         Kaiserparam p = estimateKaiser(60, transition);
-        L_phase = (p.numTaps + up - 1) / up;
-        float* h = new float[up*L_phase]{};
+        phaseLen = (p.numTaps + up - 1) / up;
+        float* h = new float[up*phaseLen]{};
         kaiserLpf(h, cutoff, p);
         scale(h, (float)up, p.numTaps);
-        re_filt = new float[up*L_phase]{};
-        im_filt = new float[up*L_phase]{};
-        for(int i = 0; i < up; i++){
-            for(unsigned int j = 0; j < L_phase; ++j){
-                re_filt[L_phase * (i + 1) - 1 - j] = 2*h[i + up * j]
-                * std::cos(2 * pi * fc * (i + up * j)/(48e3*up));
-                im_filt[L_phase * (i + 1) - 1 - j] = 2*h[i + up * j]
-                * std::sin(2 * pi * fc * (i + up * j)/(48e3*up));     
+        re_filt = new float[up*phaseLen]{};
+        im_filt = new float[up*phaseLen]{};
+        for(size_t i = 0; i < up; i++){
+            for(size_t j = 0; j < phaseLen; ++j){
+                float angle = 2.0f * pi * fc * (float)(i + up * j) / (48000.0f * (float)up);
+                re_filt[phaseLen * (i + 1) - 1 - j] = 2*h[i + up * j] * std::cos(angle);
+                im_filt[phaseLen * (i + 1) - 1 - j] = 2*h[i + up * j] * std::sin(angle);     
 
             }
         }
@@ -148,19 +146,18 @@ public:
         const size_t capacity = out.writable();
         cv32 wr = out.wr_c();
 
-        const size_t required = std::max(
-            size_t(L_phase), size_t((down + up - 1) / up));
+        const size_t required = std::max(phaseLen, (down + up - 1) / up);
 
         size_t consumed = 0;
         size_t produced = 0;
 
         while (available - consumed >= required && produced < capacity) {
-            const float* re_ph = re_filt + filter_phase * L_phase;
-            const float* im_ph = im_filt + filter_phase * L_phase;
+            const float* re_ph = re_filt + filter_phase * phaseLen;
+            const float* im_ph = im_filt + filter_phase * phaseLen;
             const float* input = rd + consumed;
             float re = 0.0f;
             float im = 0.0f;
-            for (unsigned j = 0; j < L_phase; ++j) {
+            for (size_t j = 0; j < phaseLen; ++j) {
                 const float re_h = re_ph[j];
                 const float im_h = im_ph[j];
                 re += input[j] * re_h;
@@ -183,7 +180,7 @@ public:
         if (fc_kHz < 2 || fc_kHz > 18)
             fail("wrong centre frequency was attempted");
 
-        fc = fc_kHz * 1000.0f;
+        fc = static_cast<float>(fc_kHz) * 1000.0f;
         filter_design();
         lut.update(fc, cfg.sr);
         lut_window = 48 * up;
@@ -197,17 +194,17 @@ private:
 
     // resampler attributes
     link_cfg cfg;
-    int up;
-    int down;
-    unsigned L_phase = 0;
-    unsigned filter_phase = 0;
+    size_t up;
+    size_t down;
+    size_t phaseLen = 0;
+    size_t filter_phase = 0;
     float *re_filt = nullptr, *im_filt = nullptr;
 
     //mixer attributes
     float fc = 5e3;
-    int lut_window;
+    size_t lut_window;
     trianglut lut;
-    int lut_idx;
+    size_t lut_idx;
 };
 
 // baseband signal generator
@@ -216,9 +213,9 @@ struct ofdm_modulator: runnable{
     const link_cfg& _cfg):
     runnable(sch, "ofdm_modulator"),
     cfg(_cfg),
+    fft_engine(_cfg.nFFT),
     in(_in), 
-    out(_out, (cfg.nFFT + cfg.cp) * cfg.nSym),
-    fft_engine(_cfg.nFFT){};
+    out(_out, (cfg.nFFT + cfg.cp) * cfg.nSym){};
     void run() override{
         if(in.readable() < cfg.nSC * cfg.nSym ||
             out.writable() < (cfg.nFFT + cfg.cp) * cfg.nSym)
@@ -233,7 +230,7 @@ struct ofdm_modulator: runnable{
 
         size_t out_offset = (size_t)(cfg.cp + cfg.nFFT - cfg.nSC/2);
         size_t in_offset = (size_t)(cfg.nSC/2);
-        size_t fft_index = static_cast<size_t>(cfg.bw);
+        
         size_t sym_index = 0;
         while(sym_index < cfg.nSym){
             for(size_t i = 0; i < cfg.nSC/2; ++i){
@@ -261,27 +258,27 @@ private:
 struct timesync{
     static constexpr size_t window = 4096;
     timesync(const link_cfg& cfg):
+    fft_engine(window),
     pss{new float[window]{}, new float[window]{}},
     corr{new float[window]{}, new float[window]{}},
-    npss(cfg.cp + cfg.nFFT),
-    fft_engine(window){
+    npss(cfg.cp + cfg.nFFT){
         constexpr int root = 25;
         for (int n = 0; n < 62; ++n) {
             int k = (n < 31) ? n : n + 1;
             int c = (n < 31) ? (cfg.nFFT - 31 + n):(n - 30);
-            float phase = -pi * root * k * (k + 1) / 63.0;
+            float phase = -pi * (float)(root * k * (k + 1)) / 63.0f;
             pss.re[c + cfg.cp] = std::cos(phase);
             pss.im[c + cfg.cp] = std::sin(phase);
         }
         fft symbol_fft(cfg.nFFT);
         symbol_fft.inverse(pss + cfg.cp);
-        for (int i = 0; i < cfg.cp; ++i)
+        for (size_t i = 0; i < cfg.cp; ++i)
             pss[i] = pss[cfg.nFFT + i];
         fft_engine.forward(pss);
         pssEnergy = 0;
         for (size_t i = 0; i < window; ++i){
             pss.im[i] = -pss.im[i];
-            pssEnergy += std::pow(pss.im[i], 2) + std::pow(pss.re[i], 2);
+            pssEnergy += pss.im[i]*pss.im[i] + pss.re[i] * pss.re[i];
         }
         pssEnergy /= window;
         th = 34.0f / (cfg.nSC - 10.0f + cfg.nFFT); // empirical formula
@@ -311,10 +308,10 @@ struct timesync{
             sigEnergy += abs(sig[i]);
         }
         float peak = 0;
-        int peak_idx = 0;
+        size_t peak_idx = 0;
         for (size_t i = 0; i < valid; ++i){
             float c = abs(corr[i]);
-            c /= (sigEnergy * pssEnergy + 1e-7);
+            c /= (sigEnergy * pssEnergy + 1e-7f);
             if (i + 1 < valid)
                 sigEnergy += abs(sig[i + npss]) - abs(sig[i]);
             if (c > peak){
@@ -322,7 +319,7 @@ struct timesync{
                 peak_idx = i;
             }
         }
-        if (peak > th) return peak_idx;
+        if (peak > th) return (int)peak_idx;
         return -1;
     }
 private:
@@ -335,7 +332,7 @@ private:
 };
 struct freqsync{
     freqsync(const link_cfg& cfg):
-    osc(1), fr(0),nfft(cfg.nFFT), cp(cfg.cp), sr(cfg.sr){
+    osc(1), fr(0), sr(cfg.sr), nfft(cfg.nFFT), cp(cfg.cp){
         timer = 0;
         step = 1;
     };
@@ -351,7 +348,7 @@ struct freqsync{
         float arg = std::arg(cf32(re, im));
         float _fr = -15.0f * arg/(2*pi);
         if (fr == 0) fr = _fr;
-        fr = 0.8 * fr + 0.2 * _fr;
+        fr = 0.8f * fr + 0.2f * _fr;
         float angle = -2 * pi * fr / sr;
         step = cf32(std::cos(angle), std::sin(angle));
         osc /= std::abs(osc);
@@ -391,7 +388,7 @@ struct ofdm_demodulator: runnable{
         if (!sync) init_search();
         if (sync && nsym == cfg.nSym * 5) pss_confirm();
 
-        if(in.readable() < preserved + (cfg.nFFT + cfg.cp) * cfg.nSym ||
+        if(in.readable() < (size_t)(preserved + (cfg.nFFT + cfg.cp) * cfg.nSym) ||
         out.writable() < cfg.nSC * cfg.nSym || !sync)
             return;
 
@@ -402,7 +399,7 @@ struct ofdm_demodulator: runnable{
         size_t in_offset = cfg.nFFT - cfg.nSC/2;
         size_t out_offset = cfg.nSC/2;
 
-        for (int i = 0; i < cfg.nSym; ++i){
+        for (int s = 0; s < cfg.nSym; ++s){
             ++nsym;
             // copy the preserved symbols from last 
             if (nsym == cfg.nSym * 5) save_tail(symin);
@@ -431,7 +428,7 @@ struct ofdm_demodulator: runnable{
         while (!sync) {
             if (in.readable() < cfg.cp + cfg.nFFT)
                 return;
-            int searched = std::min(in.readable(), tsync.window);
+            size_t searched = std::min(in.readable(), tsync.window);
             int t = tsync.sync(in.rd_c(), searched);
             if (t == -1) {
                 in.read(searched - (cfg.nFFT + cfg.cp) + 1);
@@ -444,10 +441,10 @@ struct ofdm_demodulator: runnable{
         }
     }
     void pss_confirm(){
-        if (in.readable() < preserved + cfg.cp + cfg.nFFT + preserve_length)
+        if (in.readable() < (size_t)(preserved + cfg.cp + cfg.nFFT + preserve_length))
             return;
         nsym = 0;
-        int searched = std::min(in.readable(), tsync.window);
+        size_t searched = std::min(in.readable(), tsync.window);
         int t = tsync.sync(in.rd_c(), searched);
         if (t == -1){
             sync = sync > 4 ? 0: sync + 1;

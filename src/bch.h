@@ -56,7 +56,7 @@ public:
         uint16_t x = 1;
         for (int i = 0; i < ORDER; ++i){
             exp_table[i] = x;
-            log_table[x] = i;
+            log_table[x] = (int16_t)i;
             bool overflow = (x & (1u << (M - 1))) != 0;
             x <<= 1;
             if (overflow)
@@ -244,7 +244,7 @@ inline void bch_encode(uint8_t * code, const bch_config& cfg) {
     for (int i = parity_bits - 1, j = cfg.K; i >= 0; --i, ++j) {
         const unsigned shift = 7 - (j & 7);
         const unsigned bit = (remainder >> i) & 1;
-        code[j >> 3] = (code[j >> 3] & ~(1u << shift)) | (bit << shift);
+        code[j >> 3] = (uint8_t)((code[j >> 3] & ~(1u << shift)) | (bit << shift));
     }
 }
 

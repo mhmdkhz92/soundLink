@@ -79,7 +79,7 @@ struct trianglut {
 
     void update(float Fc, float Fs) {
         for (size_t i = 0; i < size; ++i) {
-            const float phase = 2 * pi * Fc * i / Fs;
+            const float phase = 2.0f * pi * Fc * (float)i / Fs;
             sin[i] = std::sin(phase);
             cos[i] = std::cos(phase);
         }
@@ -138,9 +138,10 @@ private:
         }
         stages<Inverse>(re, im);
         if (Inverse) {
+            const float invN = 1.0f / (float)N;
             for (size_t i = 0; i < N; ++i) {
-                re[i] *= 1.0f / N;
-                im[i] *= 1.0f / N;
+                re[i] *= invN;
+                im[i] *= invN;
             }
         }
     }
@@ -166,7 +167,7 @@ public:
         }
         for (size_t step = 1; step < N; step *= 2) {
             for (size_t j = 0; j < step; ++j) {
-                const double angle = -2* pi * j / (2 * step);
+                const double angle = -2.0 * 3.14159265358979323846 * (double)j / (2.0 * (double)step);
                 tw_re[step - 1 + j] = float(std::cos(angle));
                 tw_im[step - 1 + j] = float(std::sin(angle));
             }
