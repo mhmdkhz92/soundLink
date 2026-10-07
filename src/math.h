@@ -91,45 +91,35 @@ struct trianglut {
 };
 
 
-struct fft_base {
-    virtual ~fft_base() = default;
-    virtual void forward(cv32 data) const = 0;
-    virtual void inverse(cv32 data) const = 0;
-};
-
-template<size_t N>
-struct fft:fft_base {
-    static_assert(N >= 2 && (N & (N - 1)) == 0, "FFT length must be a power of two >= 2");
+struct fft {
 private:
-    size_t bit_rev[N];
-    alignas(64) float tw_re[N - 1];
-    alignas(64) float tw_im[N - 1];
+    const size_t N;
+    size_t* bit_rev;
+    float* tw_re;
+    float* tw_im;
 
-    template<size_t Step, bool Inverse>
-    typename std::enable_if<Step == N>::type stages(float*, float*) const {}
-
-    template<size_t Step, bool Inverse>
-    typename std::enable_if<(Step < N)>::type stages(
-        float* __restrict re, float* __restrict im) const {
-        const float* tr = tw_re + Step - 1;
-        const float* ti = tw_im + Step - 1;
-        for (size_t i = 0; i < N; i += 2 * Step) {
-            for (size_t j = 0; j < Step; ++j) {
-                const size_t a = i + j;
-                const size_t b = a + Step;
-                const float wr = tr[j];
-                const float wi = Inverse ? -ti[j] : ti[j];
-                const float xr = wr * re[b] - wi * im[b];
-                const float xi = wr * im[b] + wi * re[b];
-                const float ur = re[a];
-                const float ui = im[a];
-                re[a] = ur + xr;
-                im[a] = ui + xi;
-                re[b] = ur - xr;
-                im[b] = ui - xi;
+    template<bool Inverse>
+    void stages(float* __restrict re, float* __restrict im) const {
+        for (size_t Step = 1; Step < N; Step *= 2) {
+            const float* tr = tw_re + Step - 1;
+            const float* ti = tw_im + Step - 1;
+            for (size_t i = 0; i < N; i += 2 * Step) {
+                for (size_t j = 0; j < Step; ++j) {
+                    const size_t a = i + j;
+                    const size_t b = a + Step;
+                    const float wr = tr[j];
+                    const float wi = Inverse ? -ti[j] : ti[j];
+                    const float xr = wr * re[b] - wi * im[b];
+                    const float xi = wr * im[b] + wi * re[b];
+                    const float ur = re[a];
+                    const float ui = im[a];
+                    re[a] = ur + xr;
+                    im[a] = ui + xi;
+                    re[b] = ur - xr;
+                    im[b] = ui - xi;
+                }
             }
         }
-        stages<Step * 2, Inverse>(re, im);
     }
     template<bool Inverse>
     void process(cv32 data) const {
@@ -146,7 +136,7 @@ private:
                 im[j] = v;
             }
         }
-        stages<1, Inverse>(re, im);
+        stages<Inverse>(re, im);
         if (Inverse) {
             for (size_t i = 0; i < N; ++i) {
                 re[i] *= 1.0f / N;
@@ -155,7 +145,19 @@ private:
         }
     }
 public:
-    fft(){
+    explicit fft(size_t N): N(N), bit_rev(nullptr), tw_re(nullptr), tw_im(nullptr) {
+        if (N < 2 || (N & (N - 1)) != 0)
+            fail("FFT length must be a power of two >= 2");
+        try {
+            bit_rev = new size_t[N];
+            tw_re = new float[N - 1];
+            tw_im = new float[N - 1];
+        } catch (...) {
+            delete[] bit_rev;
+            delete[] tw_re;
+            delete[] tw_im;
+            throw;
+        }
         for (size_t i = 0; i < N; ++i) {
             size_t rev = 0;
             for (size_t n = N, bits = i; n > 1; n >>= 1, bits >>= 1)
@@ -164,18 +166,27 @@ public:
         }
         for (size_t step = 1; step < N; step *= 2) {
             for (size_t j = 0; j < step; ++j) {
-                const double angle = -6.28318530717958647692 * j / (2 * step);
+                const double angle = -2* pi * j / (2 * step);
                 tw_re[step - 1 + j] = float(std::cos(angle));
                 tw_im[step - 1 + j] = float(std::sin(angle));
             }
         }
     }
 
-    void forward(cv32 data) const override {
+    ~fft() {
+        delete[] bit_rev;
+        delete[] tw_re;
+        delete[] tw_im;
+    }
+
+    fft(const fft&) = delete;
+    fft& operator=(const fft&) = delete;
+
+    void forward(cv32 data) const {
         process<false>(data);
     }
 
-    void inverse(cv32 data) const override {
+    void inverse(cv32 data) const {
         process<true>(data);
     }
 };

@@ -213,12 +213,12 @@ private:
 // baseband signal generator
 struct ofdm_modulator: runnable{
     ofdm_modulator(scheduler *sch,  pipebuf_c<float> &_in, pipebuf_c<float> &_out, 
-    const link_cfg& _cfg): runnable(sch, "ofdm_modulator"),cfg(_cfg),
-    in(_in), out(_out, (cfg.nFFT + cfg.cp) * cfg.nSym){
-        fft_engines[0] = new fft<128>();fft_engines[1] = new fft<256>();
-        fft_engines[2] = new fft<512>();fft_engines[3] = new fft<1024>();
-        
-    }
+    const link_cfg& _cfg):
+    runnable(sch, "ofdm_modulator"),
+    cfg(_cfg),
+    in(_in), 
+    out(_out, (cfg.nFFT + cfg.cp) * cfg.nSym),
+    fft_engine(_cfg.nFFT){};
     void run() override{
         if(in.readable() < cfg.nSC * cfg.nSym ||
             out.writable() < (cfg.nFFT + cfg.cp) * cfg.nSym)
@@ -240,7 +240,7 @@ struct ofdm_modulator: runnable{
                 symout[out_offset + i] = symin[i];
                 symout[cfg.cp + 1 + i] = symin[in_offset + i];    
             }
-            fft_engines[fft_index]->inverse(symout + cfg.cp);
+            fft_engine.inverse(symout + cfg.cp);
             std::memmove(symout.re, symout.re + cfg.nFFT, sizeof(float) * cfg.cp);
             std::memmove(symout.im, symout.im + cfg.nFFT, sizeof(float) * cfg.cp);
             symin += cfg.nSC;
@@ -250,16 +250,9 @@ struct ofdm_modulator: runnable{
         in.read(cfg.nSym * cfg.nSC);
         out.written(cfg.nSym * (cfg.nFFT + cfg.cp));
     }
-    ~ofdm_modulator(){
-        delete fft_engines[0];
-        delete fft_engines[1];
-        delete fft_engines[2];
-        delete fft_engines[3];
-    }
-
 private:
     const link_cfg& cfg;
-    fft_base* fft_engines[4];
+    fft fft_engine;
     pipereader<float> in;
     pipewriter <float> out;
 
@@ -267,28 +260,31 @@ private:
 };
 struct timesync{
     static constexpr size_t window = 4096;
-    timesync(const link_cfg& cfg, const fft_base& symbol_fft):
+    timesync(const link_cfg& cfg):
     pss{new float[window]{}, new float[window]{}},
-    corr{new float[window]{}, new float[window]{}}{
+    corr{new float[window]{}, new float[window]{}},
+    npss(cfg.cp + cfg.nFFT),
+    fft_engine(window){
         constexpr int root = 25;
         for (int n = 0; n < 62; ++n) {
             int k = (n < 31) ? n : n + 1;
             int c = (n < 31) ? (cfg.nFFT - 31 + n):(n - 30);
             float phase = -pi * root * k * (k + 1) / 63.0;
-            pss.re[c] = std::cos(phase);
-            pss.im[c] = std::sin(phase);
+            pss.re[c + cfg.cp] = std::cos(phase);
+            pss.im[c + cfg.cp] = std::sin(phase);
         }
-        symbol_fft.inverse(pss);
+        fft symbol_fft(cfg.nFFT);
+        symbol_fft.inverse(pss + cfg.cp);
+        for (int i = 0; i < cfg.cp; ++i)
+            pss[i] = pss[cfg.nFFT + i];
         fft_engine.forward(pss);
-
         pssEnergy = 0;
         for (size_t i = 0; i < window; ++i){
             pss.im[i] = -pss.im[i];
             pssEnergy += std::pow(pss.im[i], 2) + std::pow(pss.re[i], 2);
         }
-        npss = cfg.nFFT;
         pssEnergy /= window;
-        th = 62.0f / (cfg.nSC - 10.0f + cfg.nFFT); // empirical formula
+        th = 34.0f / (cfg.nSC - 10.0f + cfg.nFFT); // empirical formula
     }
     ~timesync(){
         delete[] pss.re;delete[] pss.im;
@@ -331,7 +327,7 @@ struct timesync{
     }
 private:
     float th;
-    fft<window> fft_engine;
+    fft fft_engine;
     cv32 pss;
     cv32 corr;
     size_t npss;
@@ -384,87 +380,110 @@ struct ofdm_demodulator: runnable{
     ofdm_demodulator(scheduler *sch, pipebuf_c<float> &_in,
     pipebuf_c<float> &_out, const link_cfg& _cfg):
     runnable(sch, "ofdm_demodulator"),
-    cfg(_cfg), in(_in), out(_out, _cfg.nSC * _cfg.nSym){
-        fft_engines[0] = new fft<128>();fft_engines[1] = new fft<256>();
-        fft_engines[2] = new fft<512>();fft_engines[3] = new fft<1024>();
-
-        buffer_re = new float[cfg.nFFT + cfg.cp];
-        buffer_im = new float[cfg.nFFT + cfg.cp];
-        size_t fft_index = static_cast<size_t>(cfg.bw);
-        tsync = new timesync(_cfg, *fft_engines[fft_index]);
-        fsync = new freqsync(_cfg);
-    }
+    cfg(_cfg),
+    fft_engine(_cfg.nFFT),
+    in(_in),
+    out(_out, _cfg.nSC * _cfg.nSym),
+    tsync(_cfg), fsync(_cfg),
+    sync(0), nsym(0), preserved(0){}
 
     void run() override{
-        while (!sync) {
-            if (in.readable() < cfg.cp + cfg.nFFT)
-                return;
-            int searched = std::min(in.readable() - cfg.cp, tsync->window);
-            int t = tsync->sync(in.rd_c() + cfg.cp, searched);
-            if (t == -1) {
-                in.read(searched - cfg.nFFT + 1);
-                continue;
-            }
-            in.read((size_t)t);
-            sync = true;
-        }
-        if(in.readable() < (cfg.nFFT + cfg.cp) * cfg.nSym ||
-        out.writable() < cfg.nSC * cfg.nSym)
+        if (!sync) init_search();
+        if (sync && nsym == cfg.nSym * 5) pss_confirm();
+
+        if(in.readable() < preserved + (cfg.nFFT + cfg.cp) * cfg.nSym ||
+        out.writable() < cfg.nSC * cfg.nSym || !sync)
             return;
 
-        cv32 symin = in.rd_c();
+        cv32 symin = in.rd_c() + preserved;
         cv32 symout = out.wr_c();
 
 
-        size_t in_offset = cfg.nFFT + cfg.cp - cfg.nSC/2;
+        size_t in_offset = cfg.nFFT - cfg.nSC/2;
         size_t out_offset = cfg.nSC/2;
-        size_t fft_index = static_cast<size_t>(cfg.bw);
-        size_t sym_index = 0;
 
-        while(sym_index < cfg.nSym){
-            std::memcpy(buffer_re, symin.re, sizeof(float) * (cfg.cp+cfg.nFFT));
-            std::memcpy(buffer_im, symin.im, sizeof(float) * (cfg.cp+cfg.nFFT));
-
-            fsync->sync(cv32{buffer_re, buffer_im});
-            fft_engines[fft_index]->forward(cv32{buffer_re + cfg.cp, buffer_im + cfg.cp});
-
+        for (int i = 0; i < cfg.nSym; ++i){
+            ++nsym;
+            // copy the preserved symbols from last 
+            if (nsym == cfg.nSym * 5) save_tail(symin);
+            // process
+            fsync.sync(symin);
+            fft_engine.forward(symin + cfg.cp);
+            float* buffer_re = symin.re + cfg.cp;
+            float* buffer_im = symin.im + cfg.cp;
             for(size_t i = 0; i < cfg.nSC/2; ++i){
                 symout.re[i] = buffer_re[in_offset + i];
                 symout.im[i] = buffer_im[in_offset + i];
-                symout.re[out_offset + i] = buffer_re[cfg.cp + 1 + i];
-                symout.im[out_offset + i] = buffer_im[cfg.cp + 1 + i];
+                symout.re[out_offset + i] = buffer_re[1 + i];
+                symout.im[out_offset + i] = buffer_im[1 + i];
             }
 
+            // paste the preserves smbols to the last
+            if (nsym == cfg.nSym * 5) restore_tail(symin);
             symin += cfg.nFFT + cfg.cp;
             symout += cfg.nSC;
-            sym_index++;
         }
 
         in.read(cfg.nSym * (cfg.nFFT + cfg.cp));
         out.written(cfg.nSym * cfg.nSC);
     }
-
-    ~ofdm_demodulator(){
-        delete fft_engines[0];
-        delete fft_engines[1];
-        delete fft_engines[2];
-        delete fft_engines[3];
-        delete[] buffer_re;
-        delete[] buffer_im;
-        delete tsync;
-        delete fsync;
+    void init_search(){
+        while (!sync) {
+            if (in.readable() < cfg.cp + cfg.nFFT)
+                return;
+            int searched = std::min(in.readable(), tsync.window);
+            int t = tsync.sync(in.rd_c(), searched);
+            if (t == -1) {
+                in.read(searched - (cfg.nFFT + cfg.cp) + 1);
+                continue;
+            }
+            preserved = std::min(t, preserve_length);
+            in.read((size_t) (t - preserved));
+            sync = 1;
+            nsym = 0;
+        }
+    }
+    void pss_confirm(){
+        if (in.readable() < preserved + cfg.cp + cfg.nFFT + preserve_length)
+            return;
+        nsym = 0;
+        int searched = std::min(in.readable(), tsync.window);
+        int t = tsync.sync(in.rd_c(), searched);
+        if (t == -1){
+            sync = sync > 4 ? 0: sync + 1;
+            return;
+        }
+        preserved = std::min(t, preserve_length);
+        in.read((size_t) (t - preserved));
+        sync = 1;
+        }
+    void save_tail(cv32 symbol) {
+        const int start = cfg.nFFT + cfg.cp - preserved;
+        for (int p = 0; p < preserved; ++p) {
+            re_p[p] = symbol.re[start + p];
+            im_p[p] = symbol.im[start + p];
+        }
     }
 
+    void restore_tail(cv32 symbol) {
+        const int start = cfg.nFFT + cfg.cp - preserved;
+        for (int p = 0; p < preserved; ++p) {
+            symbol.re[start + p] = re_p[p];
+            symbol.im[start + p] = im_p[p];
+        }
+    }
 private:
+    static constexpr int preserve_length = 30;
     const link_cfg& cfg;
-    fft_base* fft_engines[4];
+    fft fft_engine;
     pipereader<float> in;
     pipewriter<float> out;
-    float* buffer_re;
-    float* buffer_im;
-    timesync* tsync;
-    freqsync* fsync;
-    bool sync = false;
+    timesync tsync;
+    freqsync fsync;
+    u8 sync;
+    u8 nsym;
+    int preserved;
+    float re_p[preserve_length], im_p[preserve_length];
 };
 }
 
