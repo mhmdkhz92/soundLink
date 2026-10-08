@@ -10,7 +10,7 @@ constexpr uint32_t SYNC_WORD = 0x1ACFFC1D;
 // Each row holds one packed BCH codeword; complete matrices are byte-aligned.
 template<size_t Width, size_t Height>
 struct interleaver : runnable {
-    static_assert(Height > 0 && Height % 8 == 0, "Interleaver height must be a multiple of eight");
+    static_assert(Height % 8 == 0, "Interleaver height must be a multiple of eight");
     size_t block_bytes = Width * Height / 8;
     size_t sync_bytes = sizeof(SYNC_WORD);
     size_t frame_bytes = sync_bytes + block_bytes;
@@ -54,7 +54,7 @@ private:
 
 template<size_t Width, size_t Height>
 struct deinterleaver : runnable {
-    static_assert(Height > 0 && Height % 8 == 0, "Deinterleaver height must be  multiple of eight");
+    static_assert(Height % 8 == 0, "Deinterleaver height must be  multiple of eight");
 
     size_t block_bits = Width * Height;
     size_t block_bytes = block_bits/8;
@@ -69,13 +69,7 @@ struct deinterleaver : runnable {
 
     void run() override {
         while(1){
-            if(!sync) sync_acquisition();
-            if(!sync) return;
-            if(!check){
-                if(in.readable() < 32) return;
-                markerCheck();
-                if(!sync) continue;
-            }
+            if(!markerCheck()) return;
             if(in.readable() < block_bits || out.writable() < block_bytes)
                 return;
 
@@ -113,8 +107,13 @@ struct deinterleaver : runnable {
             }
         }
     }
-    void markerCheck(){
-        if(sync && in.readable() >= 32){
+    bool markerCheck(){
+        while(!check){
+            if(!sync){
+                sync_acquisition();
+                return check != 0;
+            }
+            if(in.readable() < 32) return false;
             u8 packed;
             for (int i = 0; i < 4; ++i){
                 in.read_bits(&packed, 8);
@@ -124,6 +123,7 @@ struct deinterleaver : runnable {
             else --sync;
             check = sync ? 1 : 0;
         }
+        return true;
     }
 
 private:
