@@ -333,7 +333,7 @@ private:
 struct freqsync{
     freqsync(const link_cfg& cfg):
     osc(1), fr(0), sr(cfg.sr), nfft(cfg.nFFT), cp(cfg.cp){
-        timer = 0;
+        sync_flag = 0;
         step = 1;
     };
     void freq_est(cv32 ofdm){
@@ -348,14 +348,19 @@ struct freqsync{
         float arg = std::arg(cf32(re, im));
         float _fr = -15.0f * arg/(2*pi);
         if (fr == 0) fr = _fr;
-        fr = 0.8f * fr + 0.2f * _fr;
+        fr = 0.9f * fr + 0.1f * _fr;
+        ++sync_flag;
+    }
+    void update(){
         float angle = -2 * pi * fr / sr;
         step = cf32(std::cos(angle), std::sin(angle));
         osc /= std::abs(osc);
     }
     void sync(cv32 ofdm){
-        if (timer++ == 0) freq_est(ofdm);
-        timer &= 0x03;
+        if (sync_flag == 0)
+            freq_est(ofdm);
+        else
+            sync_flag = 0;
         float re, im;
         float* re_ofdm = ofdm.re;
         float* im_ofdm = ofdm.im;
@@ -371,7 +376,7 @@ private:
     float fr;
     float sr;
     int nfft, cp;
-    int timer = 0;
+    int sync_flag = 0;
 };
 struct ofdm_demodulator: runnable{
     ofdm_demodulator(scheduler *sch, pipebuf_c<float> &_in,
@@ -398,7 +403,7 @@ struct ofdm_demodulator: runnable{
 
         size_t in_offset = cfg.nFFT - cfg.nSC/2;
         size_t out_offset = cfg.nSC/2;
-
+        fsync.update();
         for (int s = 0; s < cfg.nSym; ++s){
             ++nsym;
             // copy the preserved symbols from last 
@@ -420,7 +425,6 @@ struct ofdm_demodulator: runnable{
             symin += cfg.nFFT + cfg.cp;
             symout += cfg.nSC;
         }
-
         in.read(cfg.nSym * (cfg.nFFT + cfg.cp));
         out.written(cfg.nSym * cfg.nSC);
     }
