@@ -332,7 +332,7 @@ private:
 };
 struct freqsync{
     freqsync(const link_cfg& cfg):
-    osc(1), fr(0), sr(cfg.sr), nfft(cfg.nFFT), cp(cfg.cp){
+    osc(1), fr(0.005, 0.1f), sr(cfg.sr), nfft(cfg.nFFT), cp(cfg.cp){
         sync_flag = 0;
         step = 1;
     };
@@ -347,12 +347,11 @@ struct freqsync{
         }
         float arg = std::arg(cf32(re, im));
         float _fr = -15.0f * arg/(2*pi);
-        if (fr == 0) fr = _fr;
-        fr = 0.9f * fr + 0.1f * _fr;
+        fr.update(_fr);
         ++sync_flag;
     }
     void update(){
-        float angle = -2 * pi * fr / sr;
+        float angle = -2 * pi * fr.value / sr;
         step = cf32(std::cos(angle), std::sin(angle));
         osc /= std::abs(osc);
     }
@@ -373,12 +372,13 @@ struct freqsync{
     }
 private:
     cf32 osc, step;
-    float fr;
+    kalman fr;
     float sr;
     int nfft, cp;
     int sync_flag = 0;
 };
 struct ofdm_demodulator: runnable{
+    bool synchronized() const { return sync != 0; }
     ofdm_demodulator(scheduler *sch, pipebuf_c<float> &_in,
     pipebuf_c<float> &_out, const link_cfg& _cfg):
     runnable(sch, "ofdm_demodulator"),

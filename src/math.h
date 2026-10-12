@@ -44,6 +44,25 @@ void product_c(cv32 __restrict a,
         }
 }
 
+struct kalman {
+    float value = 0.0f;
+    kalman(float pn, float mn):
+    process_noise(pn),
+    measurement_noise(mn){}
+    void update(float measurement) {
+        // Predict: assume the value stays constant.
+        variance += process_noise;
+        // Correct using the new measurement.
+        const float gain = variance / (variance + measurement_noise);
+        value += gain * (measurement - value);
+        variance = gain * measurement_noise;
+    }
+private:
+    float variance = 1e5;           // Estimate uncertainty.
+    float process_noise;            // Expected change per update.
+    float measurement_noise;        // Measurement uncertainty.
+};
+
 template<typename T>
 inline T min(const T* a, size_t size) {
     T res = a[0];

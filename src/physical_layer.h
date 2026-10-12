@@ -4,10 +4,14 @@
 #include <vector>
 #include <cmath>
 #include "framework.h"
+#include "math.h"
 
 
 
 namespace soundlink{
+
+// constellation for gui
+typedef void (*symbol_observer_t)(void* context, cf32 sample);
 
 constexpr u16 NSYM_PER_RB = 6;
 
@@ -353,7 +357,8 @@ inline void pilot_fill(slot& sl, gold& gen, cv32 grid) {
 struct equalizer{
 public:
     equalizer(const link_cfg cfg):
-    stats(cfg.nRB), h1(cfg.nSC), h4(cfg.nSC),
+    stats(cfg.nRB),
+    h1(cfg.nSC), h4(cfg.nSC),
     nRB(cfg.nRB){};
 
     void process(slot& sl, cv32 grid){
@@ -372,15 +377,14 @@ public:
         for (size_t rb = 0; rb < nRB; ++rb) {
             u16 bits = refgen.step();
             for (size_t p = 0; p < 6; ++p) {
-                const size_t sc = 12 * rb + plt_sc[p];
-                const cf32 reference = mapQPSK(bits & 3);
-                const cf32 received = grid[at(plt_sym[p], sc)];
+                size_t sc = 12 * rb + plt_sc[p];
+                cf32 reference = mapQPSK(bits & 3);
+                cf32 received = grid[at(plt_sym[p], sc)];
 
                 auto& h = p < 3 ? h1 : h4;
-                h[sc] = received * std::conj(reference);
+                h[sc] =  received * std::conj(reference);
                 bits >>= 2;
             }
-
         }
         // vertical interpolation for symbols 1 and 4
         interp_v(h1, plt_sc);
@@ -406,9 +410,8 @@ public:
     float noise_val(u16 rb_idx){
         return stats[rb_idx].noise;
     }
-
-private:
     std::vector<rx_stats> stats;
+private:
     std::vector<cf32> h1, h4;
     size_t nRB;
     gold refgen;
@@ -582,6 +585,7 @@ struct slot_demapper:runnable{
             u8 m = static_cast<u8>(rb.m);
             llr.setN0(eq.noise_val(rb.idx));
             while (rb.nextData(index)) {
+                if (observe_symbol) observe_symbol(observer_context, g[index]);
                 llr.eval(g[index], m, llr_val);
                 for (int w = 0; w < m; w++){
                     wr[consumed++] = llr_val[w];
@@ -592,6 +596,11 @@ struct slot_demapper:runnable{
         slot_number = (++slot_number) % 5;
         sl.reset();
         grid.read(cfg.nSC * cfg.nSym);
+    }
+    symbol_observer_t observe_symbol = nullptr;
+    void* observer_context = nullptr;
+    const std::vector<rx_stats>& equalizer_stats() const {
+    return eq.stats;
     }
 
 private:
