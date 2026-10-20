@@ -1,0 +1,421 @@
+#ifndef SOUNDLINK_DATALINK_H
+#define SOUNDLINK_DATALINK_H
+
+
+#include <fstream>
+#include <filesystem>
+#include <cstdint>
+#include <vector>
+#include <stdexcept>
+#include <cstring>
+#include "framework.h"
+
+namespace soundlink{
+constexpr uint8_t packet_marker = 0xD3;
+// enums
+
+// create control packets
+enum class ctrl_type:uint8_t {
+    hello, hello_ack, probe_report, config,
+    config_ack, file_info, file_ack, ack,
+    close, close_ack
+};
+// packet type
+enum class packet_type:uint8_t {
+    data = 0,
+    ctrl = 1
+};
+//loading status
+enum class load_status:uint8_t {
+    loaded = 0,
+    failed = 1,
+    complete = 2,
+};
+// storing status
+enum class store_status:uint8_t {
+    stored = 0,
+    failed = 1,
+    complete = 2,
+};
+enum class parse_status {
+    ready,
+    incomplete,
+    no_packet
+};
+
+// packet layouts
+struct TxFrame {
+    bool ack = false;
+    uint32_t offset;          // Offset into the owned message buffer
+    uint16_t sequence;
+    uint8_t length;
+    uint8_t tx_count = 0;
+};
+struct file_info {
+    uint32_t file_size;
+    uint8_t segment_size;
+};
+
+struct ack {
+    uint16_t base;
+    std::vector<uint8_t> bitmap;
+};
+
+struct ctrl_packet {
+    uint16_t sequence;
+    ctrl_type type;
+    std::vector<uint8_t> fields;
+    uint32_t tx_count = 0;
+};
+
+struct TxMessage {
+    std::vector<uint8_t> payload;
+    TxMessage(const std::filesystem::path& path, size_t max_len):
+        cursor(0),
+        acked(0){
+        size_t max_size = 10 * 1024 * 1024; // 10 MiB
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file)
+            throw std::runtime_error("Cannot open file");
+
+        const auto file_size = file.tellg();
+        if (file_size < 0)
+            throw std::runtime_error("Cannot determine file size");
+        size_t size = static_cast<size_t>(file_size);
+        
+        if (size > max_size)
+            throw std::runtime_error("File exceeds size limit");
+
+        payload.resize(size);
+        file.seekg(0, std::ios::beg);
+
+        if (!payload.empty())
+            file.read(reinterpret_cast<char*>(payload.data()),
+            static_cast<std::streamsize>(payload.size()));
+
+        if (!file) 
+            throw std::runtime_error("Cannot read entire file");
+        
+        uint32_t offset = 0;
+        while(size != 0){
+            TxFrame frame;
+            size_t len = size < max_len?size:max_len;
+            frame.offset = offset;
+            frame.sequence = static_cast<uint16_t>(frames.size());
+            frame.length = static_cast<uint8_t>(len);
+            frames.push_back(frame);
+            size -= len;
+            offset += len;
+        }
+    }
+    bool completed(){
+        return acked == frames.size();
+    }
+    void acknowledge(size_t sequence) {
+        if (sequence  >= frames.size()) return;
+        if (!frames[sequence].ack){
+            frames[sequence].ack = true;
+            acked++;
+        }   
+    }
+    TxFrame& next() {
+        if (completed())
+            throw std::runtime_error("called while transfer finished");
+        while (frames[cursor].ack){
+            cursor++;
+            if (cursor == frames.size()) cursor = 0;
+        }
+        TxFrame& frame = frames[cursor];
+        cursor++;
+        if (cursor == frames.size()) cursor = 0;
+        return frame;
+    }
+private:
+    std::vector<TxFrame> frames;
+    size_t cursor;
+    size_t acked;
+};
+struct RxMessage {
+    std::vector<uint8_t> payload;
+    std::vector<bool> received;
+    size_t segment_size;
+    size_t received_count = 0;
+
+    RxMessage(size_t file_size, size_t segment_size)
+        : segment_size(segment_size) {
+        if (file_size > 10u * 1024 * 1024)
+            throw std::invalid_argument("File exceeds 10 MiB");
+
+        if (segment_size == 0)
+            throw std::invalid_argument("Invalid segment size");
+
+        const size_t segments = file_size /
+         segment_size + (file_size % segment_size != 0);
+
+        if (segments > 65536)
+            throw std::invalid_argument("Too many segments");
+
+        payload.resize(file_size);
+        received.resize(segments, false);
+    }
+    // True for valid segments, including duplicates so they can be ACKed again.
+    void store(size_t sequence, const void* input, size_t size){
+        if (sequence >= received.size()) return;
+        if (received[sequence]) return;
+        const size_t offset = sequence * segment_size;
+    
+        std::memcpy(payload.data() + offset, input, size);
+        received[sequence] = true;
+        ++received_count;
+    }
+    void flush_to_file(const std::filesystem::path& path){
+        if (received_count != received.size())
+            throw std::runtime_error("Cannot save incomplete message");
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        if (!file)
+            throw std::runtime_error("Cannot open output file");
+
+        if (!payload.empty())
+            file.write(reinterpret_cast<const char*>(payload.data()),
+                       static_cast<std::streamsize>(payload.size()));
+        file.close();
+        if (!file)
+            throw std::runtime_error("Cannot write output file");
+    }
+    bool complete() const {
+        return received_count == received.size();
+    }
+};
+
+struct ctrlQueue {
+    ctrlQueue(size_t m):maxqueue(m), sequence(0){};
+    // New messages queued
+    bool push(ctrl_packet packet) {
+        if (packet.type == ctrl_type::ack)
+            throw std::runtime_error("ack should go through push_ack");
+        if (packets.size() >= maxqueue) return 0;
+        packet.sequence = sequence;
+        sequence++;
+        packets.push_back(std::move(packet));
+        return 1;
+    }
+    bool push_ack(uint16_t segment){
+        uint16_t base = segment & 0xFFE0u;
+        uint32_t bit = uint32_t{1} << (segment & 31u);
+        for (auto& packet : packets) {
+            if (packet.type != ctrl_type::ack)
+                continue;
+            uint16_t stored_base = (uint16_t(packet.fields[0]) << 8) | packet.fields[1];
+
+            if (stored_base != base)
+                continue;
+
+            uint32_t bitmap = 0;
+            for (unsigned i = 0; i < 4; ++i)
+                bitmap = (bitmap << 8) | packet.fields[2 + i];
+
+            if (bitmap & bit)
+                return true; // Already represented.
+
+            bitmap |= bit;
+
+            for (unsigned i = 0; i < 4; ++i)
+                packet.fields[2 + i] =
+                    uint8_t(bitmap >> (24 - 8 * i));
+
+            packet.sequence = sequence++;
+            packet.tx_count = 0;
+            return true;
+        }
+
+        ctrl_packet packet{};
+        packet.type = ctrl_type::ack;
+        packet.fields.resize(6);
+        packet.fields[0] = uint8_t(base >> 8);
+        packet.fields[1] = uint8_t(base);
+
+        for (unsigned i = 0; i < 4; ++i)
+            packet.fields[2 + i] = uint8_t(bit >> (24 - 8 * i));
+        if (packets.size() >= maxqueue) {
+            if (!remove_ack())
+                return false;
+        }
+        packet.sequence = sequence;
+        sequence++;
+        packets.push_back(std::move(packet));
+        return true;
+    }
+    bool empty() const {
+        return packets.empty();
+    }
+
+    ctrl_packet& next() {
+        auto* selected = &packets[0];
+
+        for (auto& packet : packets) {
+            if (packet.tx_count < selected->tx_count)
+                selected = &packet;
+        }
+        return *selected;
+    }
+    void remove(uint16_t sequence) {
+        for (size_t i = 0; i < packets.size(); ++i) {
+            if (packets[i].sequence != sequence)
+                continue;
+            packets.erase(packets.begin() + i);
+            return;
+        }
+    }
+    bool remove_ack() {
+        auto selected = packets.end();
+        for (auto it = packets.begin(); it != packets.end(); ++it) {
+            if (it->type != ctrl_type::ack || it->tx_count == 0)
+                continue;
+            if (selected == packets.end() ||
+                it->tx_count > selected->tx_count)
+                selected = it;
+        }
+        if (selected == packets.end())
+            return false;
+        packets.erase(selected);
+        return true;
+    }
+private:
+    std::vector<ctrl_packet> packets;
+    size_t maxqueue;
+    uint16_t sequence;
+};
+
+// CRC GEN
+inline uint32_t crc32c(const uint8_t* data, size_t length) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < length; ++i) {
+        crc ^= data[i];
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            if (crc & 1u)
+                crc = (crc >> 1) ^ 0x82F63B78u;
+            else
+                crc >>= 1;
+        }
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+// Packet: [Marker:1B][Type:1B][segment:2B][Length:1B][Payload:0–255B][CRC-32C:4B]
+// Maximum total: 264 bytes; Length counts payload bytes; CRC covers Type through Payload.
+inline size_t link_write_data(TxMessage& m, u8* dist, size_t writable){
+    size_t written = 0;
+    while(1){
+        if(m.completed()) return written;
+        TxFrame& frame = m.next();
+        size_t required = 9 + (size_t)frame.length;
+        if(writable < required) break;
+        dist[0] = packet_marker;
+        dist[1] = (u8)packet_type::data;
+        dist[2] = (u8)(frame.sequence >> 8 & 0xFF);
+        dist[3] = (u8)(frame.sequence & 0xFF);
+        dist[4] = (u8)(frame.length);
+        std::memcpy(dist+5, m.payload.data() + frame.offset, frame.length);
+        uint32_t crc = crc32c((const uint8_t*)dist+1, 4 + (size_t)frame.length);
+        for (unsigned i = 0; i < 4; ++i)
+            dist[5 + frame.length + i] = (u8)((crc >> (24 - 8 * i)) & 0xFFu);
+            
+        frame.tx_count++;
+        writable -= required;
+        dist += required;
+        written += required;
+    }
+    return written;
+}
+// Packet: [Marker:1B][Type:1B][segment:2B][Length:1B][subType:1B][Payload:0–254B][CRC-32C:4B]
+// Maximum total: 264 bytes; Length counts subtype + fields; CRC covers Type through fields.
+inline size_t link_write_ctrl(ctrl_packet& packet, u8* dist, size_t writable){
+    size_t payload_size = packet.fields.size() + 1; // plus 1 for subtype
+    if(payload_size >= 256) throw std::runtime_error("field size issue!");
+    if(writable < 9 + payload_size) return 0;
+    dist[0] = packet_marker;
+    dist[1] = (u8)packet_type::ctrl;
+    dist[2] = (u8)(packet.sequence >> 8 & 0xFF);
+    dist[3] = (u8)(packet.sequence & 0xFF);
+    dist[4] = (u8)(payload_size);
+    dist[5] = (u8)(packet.type);
+    if (payload_size>1)
+        std::memcpy(dist + 6, packet.fields.data(), packet.fields.size());
+
+    uint32_t crc = crc32c((const uint8_t*)dist + 1, 4 + payload_size);
+
+    for (unsigned i = 0; i < 4; ++i)
+        dist[5 + payload_size + i] = (u8)((crc >> (24 - 8 * i)) & 0xFFu);
+    packet.tx_count++;
+    return 9 + payload_size;
+}
+// Packet: [Marker:1B][Type:1B][segment:2B][Length:1B][subType:1B][Payload:0–254B][CRC-32C:4B]
+inline parse_status parser(const u8* in, size_t& offset, size_t readable){
+    size_t cursor = 0;
+    while(cursor + 9 < readable){
+        if(in[cursor++] != packet_marker) continue;
+        if((uint8_t)in[cursor] != uint8_t(packet_type::data)
+        && (uint8_t)in[cursor] != uint8_t(packet_type::ctrl)) continue;
+        if (in[cursor + 3] == 0) continue;
+
+        size_t packet_len = 9 + (size_t)in[cursor + 3];
+        if (cursor + packet_len - 1 > readable){
+            offset = cursor - 1;
+            return parse_status::incomplete;
+        }
+        uint32_t crc = crc32c((const uint8_t*)(in + cursor), packet_len - 5);
+        bool check = true;
+        for(int i = 0; i < 4; ++i){
+            u8 c = u8(crc >> (24 - 8 * i));;
+            if (in[cursor + packet_len - 5 + i] != c) check = false;
+        }
+        if(!check) continue;
+        offset = cursor - 1;
+        return parse_status::ready;
+    }
+    offset = cursor;
+    return parse_status::no_packet;
+
+}
+struct mtx_loader:runnable{
+    mtx_loader(scheduler* sch, TxMessage& _m, pipebuf<u8>& _out)
+        : runnable(sch, "MTX"), out(_out, 264), m(_m) {}
+    void run() override{
+        size_t available = out.writable();
+        size_t w = link_write_data(m, out.wr(), available);
+        out.written(w);
+    }
+private:
+    pipewriter<u8> out;
+    TxMessage& m;
+};
+struct ctrl_loader:runnable{
+    ctrl_loader(scheduler* sch, ctrlQueue& _cq, pipebuf<u8>& _out)
+    : runnable(sch, "CTRLTX"), out(_out, 264), cq(_cq){}
+    void run() override {
+        size_t written = 0;
+        while (written < minwrite) {
+            size_t available = out.writable();
+            if (available == 0) break;
+            u8* wr = out.wr();
+            size_t count;
+            if (!cq.empty()) {
+                count = link_write_ctrl(cq.next(), wr, available);
+                if (count == 0) break;
+            } else {
+                size_t needed = minwrite - written;
+                count = needed < available ? needed : available;
+                std::memset(wr, 0, count);
+            }
+            out.written(count);
+            written += count;
+        }
+    }
+private:
+    static constexpr size_t minwrite = 256;
+    pipewriter<u8> out;
+    ctrlQueue& cq;
+};
+
+
+}
+#endif

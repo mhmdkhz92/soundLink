@@ -60,8 +60,8 @@ struct deinterleaver : runnable {
     size_t block_bytes = block_bits/8;
     deinterleaver(scheduler* sch, pipebuf<u8>& _in, pipebuf<u8>& _out)
         :runnable(sch, "DEINTERLEAVER"),
-        sync(0),
-        check(0),
+        sync(false),
+        check(false),
         window(0),
         src(block_bytes),
         in(_in),
@@ -69,7 +69,7 @@ struct deinterleaver : runnable {
 
     void run() override {
         while(1){
-            if(!markerCheck()) return;
+            if(!prepare_block()) return;
             if(in.readable() < block_bits || out.writable() < block_bytes)
                 return;
 
@@ -89,45 +89,39 @@ struct deinterleaver : runnable {
             }
 
             out.written(block_bytes);
-            check = 0;
+            check = false;
         }
     }
-    void sync_acquisition(){
-        if(!sync){
-            while(!sync && in.readable()){
-                u8 packed;
-                in.read_bits(&packed, 1);
-                uint32_t bit = packed >> 7;
-                window = (window << 1) | bit;
-                if (window == SYNC_WORD){
-                    check = 1;
-                    sync = 4;
-                    break;
-                }
-            }
-        }
+    void restart_search(){
+        sync = false;
+        check = false;
+        window = 0;
     }
-    bool markerCheck(){
-        while(!check){
-            if(!sync){
-                sync_acquisition();
-                return check != 0;
-            }
+    bool prepare_block(){
+        if(check) return true;
+
+        if(sync){
             if(in.readable() < 32) return false;
-            u8 packed;
-            for (int i = 0; i < 4; ++i){
-                in.read_bits(&packed, 8);
-                window = (window << 8) | packed;
-            }
-            if (window == SYNC_WORD) sync = 4;
-            else --sync;
-            check = sync ? 1 : 0;
+            u8 marker[4];
+            in.read_bits(marker, 32);
+            check = true;
+            return true;
         }
-        return true;
+
+        while(in.readable()){
+            u8 packed;
+            in.read_bits(&packed, 1);
+            window = (window << 1) | (packed >> 7);
+            if(window == SYNC_WORD){
+                sync = check = true;
+                return true;
+            }
+        }
+        return false;
     }
 
 private:
-    u8 sync, check;
+    bool sync, check;
     uint32_t window;
     std::vector<u8> src;
 

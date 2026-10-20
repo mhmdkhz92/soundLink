@@ -13,19 +13,20 @@ constexpr ma_uint32 SLEEP_THRESHOLD = SAMPLE_RATE / 5;
 namespace soundlink{
 
 struct speaker_sink : runnable {
-    speaker_sink(scheduler* sch, pipebuf<float>& _in, ma_pcm_rb& _ring)
+    speaker_sink(scheduler* sch, pipebuf<float>& _in, ma_pcm_rb& _ring,
+                 ma_uint32 _target_fill = TARGET_FILL)
         :runnable(sch, "SPEAKER_SINK"),
         in(_in),
-        ring(_ring){}
+        ring(_ring), target_fill(_target_fill){}
 
     void run() override {
         const ma_uint32 queued = ma_pcm_rb_available_read(&ring);
 
-        if (queued >= TARGET_FILL) {
+        if (queued >= target_fill) {
             return;
         }
 
-        ma_uint32 remaining = TARGET_FILL - queued;
+        ma_uint32 remaining = target_fill - queued;
 
         while (remaining > 0) {
             const size_t available = in.readable();
@@ -58,6 +59,7 @@ struct speaker_sink : runnable {
 private:
     pipereader<float> in;
     ma_pcm_rb& ring;
+    const ma_uint32 target_fill;
 };
 
 }

@@ -31,9 +31,11 @@ struct link_cfg{
     u16 nRB;                // number of resource blocks
     u16 nSC;                // number of active subcarriers
     u16 nFFT;               // number of FFT points
-    u16 nSym;             // number of symbols ber slot
-    u16 cp;                  // number of cyclic prefix points
-    link_cfg(BW _bw): nSym(NSYM_PER_RB){
+    u16 nSym;               // number of symbols ber slot
+    u16 cp;                 // number of cyclic prefix points
+    u8 slot_mask;           // active/silent pattern
+    
+    link_cfg(BW _bw, u8 _sm): nSym(NSYM_PER_RB), slot_mask(_sm){
         switch (_bw){
         case BW::BW1_4:
             bw = BW::BW1_4; bandwidth = 1.4e3; nRB = 6; nFFT = 128;
@@ -362,14 +364,7 @@ public:
     nRB(cfg.nRB){};
 
     void process(slot& sl, cv32 grid){
-        u16 sltnmbr = sl.sltnmb;
-        if(!sltnmbr) refgen.reset();
-        if(sltnmbr && (sltnmbr - goldnmbr != 1)){
-            refgen.reset();
-            for (size_t i = 0; i < nRB * sltnmbr; ++i)
-                refgen.step();
-        }
-        
+ 
         auto at = [nsc = 12 * nRB](size_t symbol, size_t sc) {
             return symbol * nsc + sc;
         };
@@ -404,7 +399,10 @@ public:
             }
         }
         noise_update(sl, grid);
-        goldnmbr = sltnmbr;
+
+    }
+    void reset_pilots(){
+        refgen.reset();
 
     }
     float noise_val(u16 rb_idx){
@@ -415,7 +413,6 @@ private:
     std::vector<cf32> h1, h4;
     size_t nRB;
     gold refgen;
-    u16 goldnmbr = 255;
     void interp_v(std::vector<cf32>& h, const u8* positions){
         size_t p = 0;
         size_t down = positions[p++];
@@ -514,30 +511,39 @@ slot_mapper(scheduler* sch, pipebuf<u8>& _in,
         makePSS(pss);
     }
     void run() override{
-        slot& sl = slot_number == 0? primary:secondary;
-        if(sl.capacity() > in.readable() ||
-            grid.writable() < cfg.nSC * cfg.nSym)
-            return;
-        pss_fill(sl, pss, grid.wr_c());
-        pilot_fill(sl, pltGen, grid.wr_c());
-        /*
-        management fill: TBD
-        */
+        bool active = (cfg.slot_mask >> (7-slot_number)) & 1u;
+        bool prev_active = (cfg.slot_mask >> (8 - slot_number)) & 1u;
+        if(active){
+            slot& sl = !prev_active? primary:secondary;
+            if(sl.capacity() > in.readable() || grid.writable() < cfg.nSC * cfg.nSym)
+                return;
+            pss_fill(sl, pss, grid.wr_c());
+            pilot_fill(sl, pltGen, grid.wr_c());
+            /*
+            management fill: TBD
+            */
 
-        u16 index;
-        u8 symbol;
-        cv32 g = grid.wr_c();
-        for (pRB& rb : sl.rb_vec) {
-            u8 bits = static_cast<u8>(rb.m);
-            while (rb.nextData(index)) {
-                in.read_bits(&symbol, bits);
-                g[index] = maps[bits](symbol >> (8 - bits));
+            u16 index;
+            u8 symbol;
+            cv32 g = grid.wr_c();
+            for (pRB& rb : sl.rb_vec) {
+                u8 bits = static_cast<u8>(rb.m);
+                while (rb.nextData(index)) {
+                    in.read_bits(&symbol, bits);
+                    g[index] = maps[bits](symbol >> (8 - bits));
+                }
             }
+            sl.reset();
         }
-        slot_number = (++slot_number) % 5;
-        if (slot_number == 0)
-        pltGen.reset();
-        sl.reset();
+        else{
+            if(grid.writable() < cfg.nSC * cfg.nSym)
+                return;
+            cv32 g = grid.wr_c();
+            for (size_t i = 0; i < size_t(cfg.nSC) * cfg.nSym; ++i)
+                g[i] = cf32(0.0f);
+        }
+        slot_number = (++slot_number) & 0x7;
+        if (slot_number == 0) pltGen.reset();
         grid.written(cfg.nSC * cfg.nSym);
     }
 private:
@@ -561,40 +567,43 @@ struct slot_demapper:runnable{
     primary(0, _cfg.nRB),
     secondary(1, _cfg.nRB),
     out(_out, int(22e3)),
-    grid(_grid), eq(_cfg)
-    {}
+    grid(_grid), eq(_cfg){}
     void run() override{
-        slot& sl = slot_number == 0? primary:secondary;
-        sl.sltnmb = slot_number;
-        // capacity check
-        if (grid.readable() < cfg.nSC * cfg.nSym ||
-            sl.capacity() > out.writable())
-            return;
+        bool active = (cfg.slot_mask >> (7-slot_number)) & 1u;
+        bool prev_active = (cfg.slot_mask >> (8 - slot_number)) & 1u;
+        if(active){
+            slot& sl = !prev_active? primary:secondary;
+            // capacity check
+            if (grid.readable() < cfg.nSC * cfg.nSym || sl.capacity() > out.writable())
+                return;
 
-        
-        //pilot extraction - ref slot filling and phase compensation
-        cv32 g = grid.rd_c();
-        eq.process(sl, g);
+            //pilot extraction - ref slot filling and phase compensation
+            cv32 g = grid.rd_c();
+            eq.process(sl, g);
 
-        // soft demapping
-        u8 llr_val[6];
-        u8* wr = out.wr();
-        size_t consumed = 0;
-        u16 index;
-        for (pRB& rb : sl.rb_vec) {
-            u8 m = static_cast<u8>(rb.m);
-            llr.setN0(eq.noise_val(rb.idx));
-            while (rb.nextData(index)) {
-                if (observe_symbol) observe_symbol(observer_context, g[index]);
-                llr.eval(g[index], m, llr_val);
-                for (int w = 0; w < m; w++){
-                    wr[consumed++] = llr_val[w];
-                }        
+            // soft demapping
+            u8 llr_val[6];
+            u8* wr = out.wr();
+            size_t consumed = 0;
+            u16 index;
+            for (pRB& rb : sl.rb_vec) {
+                u8 m = static_cast<u8>(rb.m);
+                llr.setN0(eq.noise_val(rb.idx));
+                while (rb.nextData(index)) {
+                    if (observe_symbol) observe_symbol(observer_context, g[index]);
+                    llr.eval(g[index], m, llr_val);
+                    for (int w = 0; w < m; w++){
+                        wr[consumed++] = llr_val[w];
+                    }        
+                }
             }
-        }
-        out.written(consumed);
-        slot_number = (++slot_number) % 5;
-        sl.reset();
+            out.written(consumed);
+            sl.reset(); 
+        }else{
+            if (grid.readable() < cfg.nSC * cfg.nSym) return;
+        } 
+        slot_number = (++slot_number) & 0x7;
+        if (slot_number == 0) eq.reset_pilots();
         grid.read(cfg.nSC * cfg.nSym);
     }
     symbol_observer_t observe_symbol = nullptr;

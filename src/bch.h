@@ -22,6 +22,13 @@ struct bch_config {
         return N - K;
     }
 };
+
+static constexpr bch_config bch63_36{
+    6, 63, 36, 5,   // M, N, K, T
+    0x03,           // Primitive: x^6 + x + 1
+    0x086E8113ULL   // Generator, degree 27
+};
+
 static constexpr bch_config bch63_51{
     6, 63, 51, 2,
     0x03,       // primitive

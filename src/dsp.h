@@ -333,10 +333,9 @@ private:
 struct freqsync{
     freqsync(const link_cfg& cfg):
     osc(1), fr(0.005, 0.1f), sr(cfg.sr), nfft(cfg.nFFT), cp(cfg.cp){
-        sync_flag = 0;
         step = 1;
     };
-    void freq_est(cv32 ofdm){
+    void estimate(cv32 ofdm){
         float re = 0;
         float im = 0;
         float* re_ofdm = ofdm.re;
@@ -348,18 +347,11 @@ struct freqsync{
         float arg = std::arg(cf32(re, im));
         float _fr = -15.0f * arg/(2*pi);
         fr.update(_fr);
-        ++sync_flag;
-    }
-    void update(){
         float angle = -2 * pi * fr.value / sr;
         step = cf32(std::cos(angle), std::sin(angle));
         osc /= std::abs(osc);
     }
-    void sync(cv32 ofdm){
-        if (sync_flag == 0)
-            freq_est(ofdm);
-        else
-            sync_flag = 0;
+    void correct(cv32 ofdm){
         float re, im;
         float* re_ofdm = ofdm.re;
         float* im_ofdm = ofdm.im;
@@ -375,7 +367,6 @@ private:
     kalman fr;
     float sr;
     int nfft, cp;
-    int sync_flag = 0;
 };
 struct ofdm_demodulator: runnable{
     bool synchronized() const { return sync != 0; }
@@ -387,29 +378,31 @@ struct ofdm_demodulator: runnable{
     in(_in),
     out(_out, _cfg.nSC * _cfg.nSym),
     tsync(_cfg), fsync(_cfg),
-    sync(0), nsym(0), preserved(0){}
+    sync(0),
+    preserved(0){}
 
     void run() override{
+        bool freq_update = false;
+        if (out.writable() < cfg.nSC * cfg.nSym) return;
         if (!sync) init_search();
-        if (sync && nsym == cfg.nSym * 5) pss_confirm();
+        if (sync) freq_update = pss_check();
 
-        if(in.readable() < (size_t)(preserved + (cfg.nFFT + cfg.cp) * cfg.nSym) ||
-        out.writable() < cfg.nSC * cfg.nSym || !sync)
+        if(in.readable() < (size_t)(preserved + (cfg.nFFT + cfg.cp) * cfg.nSym) || !sync)
             return;
 
         cv32 symin = in.rd_c() + preserved;
         cv32 symout = out.wr_c();
+        if (freq_update) fsync.estimate(symin);
 
 
         size_t in_offset = cfg.nFFT - cfg.nSC/2;
         size_t out_offset = cfg.nSC/2;
-        fsync.update();
+
         for (int s = 0; s < cfg.nSym; ++s){
-            ++nsym;
             // copy the preserved symbols from last 
-            if (nsym == cfg.nSym * 5) save_tail(symin);
+            if (s == cfg.nSym - 1) save_tail(symin);
             // process
-            fsync.sync(symin);
+            fsync.correct(symin);
             fft_engine.forward(symin + cfg.cp);
             float* buffer_re = symin.re + cfg.cp;
             float* buffer_im = symin.im + cfg.cp;
@@ -421,7 +414,7 @@ struct ofdm_demodulator: runnable{
             }
 
             // paste the preserves smbols to the last
-            if (nsym == cfg.nSym * 5) restore_tail(symin);
+            if (s == cfg.nSym - 1) restore_tail(symin);
             symin += cfg.nFFT + cfg.cp;
             symout += cfg.nSC;
         }
@@ -441,22 +434,19 @@ struct ofdm_demodulator: runnable{
             preserved = std::min(t, preserve_length);
             in.read((size_t) (t - preserved));
             sync = 1;
-            nsym = 0;
         }
     }
-    void pss_confirm(){
+    bool pss_check(){
         if (in.readable() < (size_t)(preserved + cfg.cp + cfg.nFFT + preserve_length))
-            return;
-        nsym = 0;
-        size_t searched = std::min(in.readable(), tsync.window);
+            return false;
+        size_t searched = preserved + cfg.cp + cfg.nFFT + preserve_length;
         int t = tsync.sync(in.rd_c(), searched);
         if (t == -1){
-            sync = sync > 4 ? 0: sync + 1;
-            return;
+            return false;
         }
         preserved = std::min(t, preserve_length);
         in.read((size_t) (t - preserved));
-        sync = 1;
+        return true;
         }
     void save_tail(cv32 symbol) {
         const int start = cfg.nFFT + cfg.cp - preserved;
@@ -482,7 +472,6 @@ private:
     timesync tsync;
     freqsync fsync;
     u8 sync;
-    u8 nsym;
     int preserved;
     float re_p[preserve_length], im_p[preserve_length];
 };
