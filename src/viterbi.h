@@ -14,9 +14,7 @@ extern unsigned char d_Partab[];
 const int POLYA = 0x4f;
 const int POLYB = 0x6d;
 typedef size_t (*punc_t)(const u8*, u8*, uint16_t&);
-enum code_rate {
-	FEC12, FEC23, FEC34, FEC56, FEC78,
-};
+
 
 #define BUTTERFLY(i, sym) {                              \
     uint32_t m0 = state[i]      + mets[sym];             \

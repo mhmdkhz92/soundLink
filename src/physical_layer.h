@@ -26,6 +26,7 @@ enum class RE_type :u8{
 
 struct link_cfg{
     BW bw;                  // bandwidth in BW enum
+    int fc;                 // center frequency
     float bandwidth;        // bandwidth in Hz
     float sr;               // sample rate
     u16 nRB;                // number of resource blocks
@@ -34,8 +35,12 @@ struct link_cfg{
     u16 nSym;               // number of symbols ber slot
     u16 cp;                 // number of cyclic prefix points
     u8 slot_mask;           // active/silent pattern
-    
-    link_cfg(BW _bw, u8 _sm): nSym(NSYM_PER_RB), slot_mask(_sm){
+    code_rate cr;
+    link_cfg(int _fc, BW _bw, code_rate _cr, u8 _sm)
+    :fc(_fc),
+    nSym(NSYM_PER_RB),
+    slot_mask(_sm),
+    cr(_cr){
         switch (_bw){
         case BW::BW1_4:
             bw = BW::BW1_4; bandwidth = 1.4e3; nRB = 6; nFFT = 128;

@@ -187,12 +187,13 @@ struct RxMessage {
     }
 };
 
-struct ctrlQueue {
-    ctrlQueue(size_t m):maxqueue(m), sequence(0){};
+struct TxctrlQueue {
+    TxctrlQueue(size_t m):maxqueue(m), sequence(0){};
     // New messages queued
     bool push(ctrl_packet packet) {
-        if (packet.type == ctrl_type::ack)
-            throw std::runtime_error("ack should go through push_ack");
+        if (packet.type == ctrl_type::ack){
+            return push_ack(packet.sequence);
+        }
         if (packets.size() >= maxqueue) return 0;
         packet.sequence = sequence;
         sequence++;
@@ -286,6 +287,35 @@ private:
     uint16_t sequence;
 };
 
+struct rxCtrlQueue {
+    rxCtrlQueue(size_t m) : maxqueue(m) {}
+
+    bool push(ctrl_packet packet) {
+        if (packets.size() >= maxqueue)
+            return false;
+
+        packets.push_back(std::move(packet));
+        return true;
+    }
+
+    bool empty() const {
+        return packets.empty();
+    }
+
+    // Caller must check empty() first.
+    ctrl_packet& next() {
+        return packets.front();
+    }
+
+    void pop() {
+        if (!packets.empty())
+            packets.erase(packets.begin());
+    }
+
+private:
+    std::vector<ctrl_packet> packets;
+    size_t maxqueue;
+};
 // CRC GEN
 inline uint32_t crc32c(const uint8_t* data, size_t length) {
     uint32_t crc = 0xFFFFFFFFu;
@@ -302,49 +332,49 @@ inline uint32_t crc32c(const uint8_t* data, size_t length) {
 }
 // Packet: [Marker:1B][Type:1B][segment:2B][Length:1B][Payload:0–255B][CRC-32C:4B]
 // Maximum total: 264 bytes; Length counts payload bytes; CRC covers Type through Payload.
-inline size_t link_write_data(TxMessage& m, u8* dist, size_t writable){
+inline size_t link_write_data(TxMessage& m, u8* dest, size_t writable){
     size_t written = 0;
     while(1){
         if(m.completed()) return written;
         TxFrame& frame = m.next();
         size_t required = 9 + (size_t)frame.length;
         if(writable < required) break;
-        dist[0] = packet_marker;
-        dist[1] = (u8)packet_type::data;
-        dist[2] = (u8)(frame.sequence >> 8 & 0xFF);
-        dist[3] = (u8)(frame.sequence & 0xFF);
-        dist[4] = (u8)(frame.length);
-        std::memcpy(dist+5, m.payload.data() + frame.offset, frame.length);
-        uint32_t crc = crc32c((const uint8_t*)dist+1, 4 + (size_t)frame.length);
+        dest[0] = packet_marker;
+        dest[1] = (u8)packet_type::data;
+        dest[2] = (u8)(frame.sequence >> 8 & 0xFF);
+        dest[3] = (u8)(frame.sequence & 0xFF);
+        dest[4] = (u8)(frame.length);
+        std::memcpy(dest+5, m.payload.data() + frame.offset, frame.length);
+        uint32_t crc = crc32c((const uint8_t*)dest+1, 4 + (size_t)frame.length);
         for (unsigned i = 0; i < 4; ++i)
-            dist[5 + frame.length + i] = (u8)((crc >> (24 - 8 * i)) & 0xFFu);
+            dest[5 + frame.length + i] = (u8)((crc >> (24 - 8 * i)) & 0xFFu);
             
         frame.tx_count++;
         writable -= required;
-        dist += required;
+        dest += required;
         written += required;
     }
     return written;
 }
 // Packet: [Marker:1B][Type:1B][segment:2B][Length:1B][subType:1B][Payload:0–254B][CRC-32C:4B]
 // Maximum total: 264 bytes; Length counts subtype + fields; CRC covers Type through fields.
-inline size_t link_write_ctrl(ctrl_packet& packet, u8* dist, size_t writable){
+inline size_t link_write_ctrl(ctrl_packet& packet, u8* dest, size_t writable){
     size_t payload_size = packet.fields.size() + 1; // plus 1 for subtype
     if(payload_size >= 256) throw std::runtime_error("field size issue!");
     if(writable < 9 + payload_size) return 0;
-    dist[0] = packet_marker;
-    dist[1] = (u8)packet_type::ctrl;
-    dist[2] = (u8)(packet.sequence >> 8 & 0xFF);
-    dist[3] = (u8)(packet.sequence & 0xFF);
-    dist[4] = (u8)(payload_size);
-    dist[5] = (u8)(packet.type);
+    dest[0] = packet_marker;
+    dest[1] = (u8)packet_type::ctrl;
+    dest[2] = (u8)(packet.sequence >> 8 & 0xFF);
+    dest[3] = (u8)(packet.sequence & 0xFF);
+    dest[4] = (u8)(payload_size);
+    dest[5] = (u8)(packet.type);
     if (payload_size>1)
-        std::memcpy(dist + 6, packet.fields.data(), packet.fields.size());
+        std::memcpy(dest + 6, packet.fields.data(), packet.fields.size());
 
-    uint32_t crc = crc32c((const uint8_t*)dist + 1, 4 + payload_size);
+    uint32_t crc = crc32c((const uint8_t*)dest + 1, 4 + payload_size);
 
     for (unsigned i = 0; i < 4; ++i)
-        dist[5 + payload_size + i] = (u8)((crc >> (24 - 8 * i)) & 0xFFu);
+        dest[5 + payload_size + i] = (u8)((crc >> (24 - 8 * i)) & 0xFFu);
     packet.tx_count++;
     return 9 + payload_size;
 }
@@ -389,8 +419,8 @@ private:
     TxMessage& m;
 };
 struct ctrl_loader:runnable{
-    ctrl_loader(scheduler* sch, ctrlQueue& _cq, pipebuf<u8>& _out)
-    : runnable(sch, "CTRLTX"), out(_out, 264), cq(_cq){}
+    ctrl_loader(scheduler* sch, TxctrlQueue& _tctrl, pipebuf<u8>& _out)
+    : runnable(sch, "CTRLTX"), out(_out, 264), tctrl(_tctrl){}
     void run() override {
         size_t written = 0;
         while (written < minwrite) {
@@ -398,8 +428,8 @@ struct ctrl_loader:runnable{
             if (available == 0) break;
             u8* wr = out.wr();
             size_t count;
-            if (!cq.empty()) {
-                count = link_write_ctrl(cq.next(), wr, available);
+            if (!tctrl.empty()) {
+                count = link_write_ctrl(tctrl.next(), wr, available);
                 if (count == 0) break;
             } else {
                 size_t needed = minwrite - written;
@@ -413,9 +443,90 @@ struct ctrl_loader:runnable{
 private:
     static constexpr size_t minwrite = 256;
     pipewriter<u8> out;
-    ctrlQueue& cq;
+    TxctrlQueue& tctrl;
 };
 
+struct mrx_store:runnable{
+    mrx_store(scheduler* sch, pipebuf<u8>& _in, RxMessage& _rx, TxctrlQueue& _tctrl)
+    :runnable(sch, "MRX"), in(_in), rx(_rx), tctrl(_tctrl){}
+    void run() override{
+        size_t offset;
+        parse_status status;
+        while(true){
+            status = parser(in.rd(), offset, in.readable());
+            if (status != parse_status::ready){
+                in.read(offset);
+                break;
+            }
+            u8* rd = in.rd() + offset;
+            if (rd[1] != (u8)packet_type::data){
+                in.read(1);
+                continue;
+            }
+            uint16_t segment = uint16_t(rd[2] << 8) | uint16_t(rd[3]);
+            if(segment >= rx.received.size()){
+                in.read(1);
+                continue;
+            }
+            size_t length = size_t(rd[4]);
+            if (length == 0 || length > rx.segment_size){
+                in.read(1);
+                continue;
+            }
+            rx.store(segment, rd + 5, length);
+            tctrl.push_ack(segment);
+            in.read(offset + 9 + length);
+        }
+    }
+private:
+    pipereader<u8> in;
+    RxMessage& rx;
+    TxctrlQueue& tctrl;
+};
+struct ctrl_store : runnable {
+    ctrl_store(scheduler* sch, pipebuf<u8>& _in, rxCtrlQueue& _rctrl)
+        :runnable(sch, "CTRLRX"), in(_in), rctrl(_rctrl){}
+
+    void run() override {
+        while (true) {
+            size_t offset;
+            auto status = parser(in.rd(), offset, in.readable());
+
+            if (status != parse_status::ready) {
+                in.read(offset);
+                return;
+            }
+
+            u8* rd = in.rd() + offset;
+
+            if (rd[1] != u8(packet_type::ctrl)) {
+                in.read(1);
+                continue;
+            }
+            size_t length = rd[4];
+            if (length == 0 || rd[5] > u8(ctrl_type::close_ack)) {
+                in.read(1);
+                continue;
+            }
+
+            ctrl_packet packet{};
+            packet.sequence = (uint16_t(rd[2]) << 8) | rd[3];
+            packet.type = static_cast<ctrl_type>(rd[5]);
+            packet.fields.assign(rd + 6, rd + 5 + length);
+
+            if (!rctrl.push(std::move(packet))) {
+                in.read(offset); // Discard preceding junk; retain packet.
+                return;
+            }
+
+            in.read(offset + 9 + length);
+        }
+    }
+
+private:
+    pipereader<u8> in;
+    rxCtrlQueue& rctrl;
+};
 
 }
 #endif

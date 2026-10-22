@@ -3,7 +3,7 @@
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
 <key>CFBundleIdentifier</key><string>com.soundlink.receiver</string>
-<key>CFBundleName</key><string>SoundLink Receiver</string>
+<key>CFBundleName</key><string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
 <key>CFBundleVersion</key><string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>

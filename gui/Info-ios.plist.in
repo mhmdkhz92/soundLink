@@ -12,7 +12,7 @@
     <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
 
     <key>CFBundleDisplayName</key>
-    <string>SoundLink Receiver</string>
+    <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
 
     <key>CFBundleIdentifier</key>
     <string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>

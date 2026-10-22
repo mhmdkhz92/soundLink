@@ -14,7 +14,12 @@ struct duc:runnable{
 public:
     duc(scheduler *sch,  pipebuf_c<float> &_in, pipebuf<float> &_out, const link_cfg& cfg)
     :runnable(sch, "duc"),
-    in(_in), out(_out), lut_idx(0), lut(fc, 48e3, winsize){
+    in(_in), out(_out), lut_idx(0), lut(5e3, 48e3, winsize){
+        if (cfg.fc < 2 || cfg.fc > 18)
+            fail("wrong centre frequency was attempted");
+
+        float fc = static_cast<float>(cfg.fc) * 1000.0f;
+        lut.update(fc, 48000.0f);
 
         up = 25;
         down = 1u << static_cast<unsigned>(cfg.bw); // 1, 2, 4, 8
@@ -73,13 +78,6 @@ public:
         in.read(consumed);
         out.written(produced);
     }
-    void set_fc(int fc_kHz) {
-        if (fc_kHz < 2 || fc_kHz > 18)
-            fail("wrong centre frequency was attempted");
-
-        fc = static_cast<float>(fc_kHz) * 1000.0f;
-        lut.update(fc, 48000.0f);
-}
     ~duc(){
         delete[] phase;
         delete[] filter;
@@ -99,7 +97,6 @@ private:
     //mixer attributes
     static constexpr size_t winsize = 48;
     size_t lut_idx;
-    float fc = 5e3;
     trianglut lut;
 };
 
@@ -109,17 +106,10 @@ struct ddc:runnable{
 public:
     ddc(scheduler *sch,  pipebuf<float> &_in, pipebuf_c<float> &_out, const link_cfg& _cfg)
     :runnable(sch, "ddc"),in(_in), out(_out), cfg(_cfg),
-    lut(fc, _cfg.sr, 48u << static_cast<unsigned>(_cfg.bw)){
+    lut(5e3, _cfg.sr, 48u << static_cast<unsigned>(_cfg.bw)){
         up = 1u << static_cast<unsigned>(cfg.bw); // 1, 2, 4, 8
         down = 25;
-        filter_design();
-        lut_window = 48 * up;
-        lut_idx =0;
-    }
-    void filter_design(){
-        // filter design
-        delete[] re_filt;
-        delete[] im_filt;
+    
         const float cutoff = 0.5f / static_cast<float>(down);
         const float transition = (1.0f - cfg.bandwidth / cfg.sr) / static_cast<float>(down);
         // apply design and obtain taps
@@ -132,14 +122,16 @@ public:
         im_filt = new float[up*phaseLen]{};
         for(size_t i = 0; i < up; i++){
             for(size_t j = 0; j < phaseLen; ++j){
-                float angle = 2.0f * pi * fc * (float)(i + up * j) / (48000.0f * (float)up);
+                float angle = 2.0f * pi * cfg.fc * (float)(i + up * j) / (48000.0f * (float)up);
                 re_filt[phaseLen * (i + 1) - 1 - j] = 2*h[i + up * j] * std::cos(angle);
                 im_filt[phaseLen * (i + 1) - 1 - j] = 2*h[i + up * j] * std::sin(angle);     
-
             }
         }
+        lut_window = 48 * up;
+        lut_idx =0;
         delete[] h;
     }
+    
     void run() override {
         const float* rd = in.rd();
         const size_t available = in.readable();
@@ -176,15 +168,6 @@ public:
         in.read(consumed);
         out.written(produced);
     }
-    void set_fc(int fc_kHz) {
-        if (fc_kHz < 2 || fc_kHz > 18)
-            fail("wrong centre frequency was attempted");
-
-        fc = static_cast<float>(fc_kHz) * 1000.0f;
-        filter_design();
-        lut.update(fc, cfg.sr);
-        lut_window = 48 * up;
-}
     ~ddc(){
         delete[] re_filt; delete[] im_filt;
     }
@@ -201,7 +184,6 @@ private:
     float *re_filt = nullptr, *im_filt = nullptr;
 
     //mixer attributes
-    float fc = 5e3;
     size_t lut_window;
     trianglut lut;
     size_t lut_idx;

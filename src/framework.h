@@ -367,5 +367,8 @@ private:
     uint16_t held;
     size_t nheld;
 };
+enum code_rate {
+	FEC12, FEC23, FEC34, FEC56, FEC78,
+};
 }
 #endif  
