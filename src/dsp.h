@@ -350,8 +350,27 @@ private:
     float sr;
     int nfft, cp;
 };
+struct pss_tracker {
+    u32 published_grids = 0;
+    u32 pss_grid = 0;
+    uint64_t pss_sample = 0;
+    bool pss_valid = false;
+    void update(bool detected, uint64_t sample) {
+        ++published_grids;
+        if (detected) {
+            pss_grid = published_grids;
+            pss_sample = sample;
+            pss_valid = true;
+        }
+    }
+};
 struct ofdm_demodulator: runnable{
-    bool synchronized() const { return sync != 0; }
+    pss_tracker pt;
+    bool synchronized() const { return state == mode::tracking; }
+    void acquire() {
+        state = mode::searching;
+        pss_detected = false;
+    }
     ofdm_demodulator(scheduler *sch, pipebuf_c<float> &_in,
     pipebuf_c<float> &_out, const link_cfg& _cfg):
     runnable(sch, "ofdm_demodulator"),
@@ -360,16 +379,24 @@ struct ofdm_demodulator: runnable{
     in(_in),
     out(_out, _cfg.nSC * _cfg.nSym),
     tsync(_cfg), fsync(_cfg),
-    sync(0),
+    state(mode::searching),
     preserved(0){}
 
     void run() override{
         bool freq_update = false;
         if (out.writable() < cfg.nSC * cfg.nSym) return;
-        if (!sync) init_search();
-        if (sync) freq_update = pss_check();
+        switch (state) {
+        case mode::searching:
+            init_search();
+            if (state == mode::tracking) freq_update = pss_check();
+            break;
+        case mode::tracking:
+            freq_update = pss_check();
+            break;
+        }
 
-        if(in.readable() < (size_t)(preserved + (cfg.nFFT + cfg.cp) * cfg.nSym) || !sync)
+        if(in.readable() < (size_t)(preserved + (cfg.nFFT + cfg.cp) * cfg.nSym)
+        || state == mode::searching)
             return;
 
         cv32 symin = in.rd_c() + preserved;
@@ -402,9 +429,11 @@ struct ofdm_demodulator: runnable{
         }
         in.read(cfg.nSym * (cfg.nFFT + cfg.cp));
         out.written(cfg.nSym * cfg.nSC);
+        pt.update(pss_detected, pss_position);
+        pss_detected = false;
     }
     void init_search(){
-        while (!sync) {
+        while (state == mode::searching) {
             if (in.readable() < cfg.cp + cfg.nFFT)
                 return;
             size_t searched = std::min(in.readable(), tsync.window);
@@ -413,9 +442,11 @@ struct ofdm_demodulator: runnable{
                 in.read(searched - (cfg.nFFT + cfg.cp) + 1);
                 continue;
             }
+            pss_position = in.buf.total_read + t;
+            pss_detected = true;
             preserved = std::min(t, preserve_length);
             in.read((size_t) (t - preserved));
-            sync = 1;
+            state = mode::tracking;
         }
     }
     bool pss_check(){
@@ -426,6 +457,8 @@ struct ofdm_demodulator: runnable{
         if (t == -1){
             return false;
         }
+        pss_position = in.buf.total_read + t;
+        pss_detected = true;
         preserved = std::min(t, preserve_length);
         in.read((size_t) (t - preserved));
         return true;
@@ -446,6 +479,10 @@ struct ofdm_demodulator: runnable{
         }
     }
 private:
+    enum class mode : u8 {
+        searching,
+        tracking
+    };
     static constexpr int preserve_length = 30;
     const link_cfg& cfg;
     fft fft_engine;
@@ -453,9 +490,11 @@ private:
     pipewriter<float> out;
     timesync tsync;
     freqsync fsync;
-    u8 sync;
+    mode state;
     int preserved;
     float re_p[preserve_length], im_p[preserve_length];
+    uint64_t pss_position;
+    bool pss_detected = false;
 };
 }
 

@@ -5,6 +5,7 @@
 #include <cmath>
 #include "framework.h"
 #include "math.h"
+#include "bch.h"
 
 
 
@@ -135,9 +136,14 @@ struct slot{
         rb_vec.reserve(_nRB);  
         for (u16 idx = 0; idx < _nRB; ++idx)
             rb_vec.push_back(pRB(idx, _nRB));
-        if(sltnmb !=0)
-            return;
 
+        pRB& rb = rb_vec[_nRB / 2 + (_nRB & 1u)];
+        for (u16 i = 0; i < 12; ++i) {
+            if (rb.get_label(i, 1) != RE_type::plt)
+                rb.set_label(i, 1, RE_type::ctrl);
+        }
+
+        if(sltnmb !=0)return;
         u16 first = (_nRB * 12 - 72) / 2;
         for (u8 i = 0; i < 72; ++i) {
             u16 k = first + i;
@@ -343,6 +349,11 @@ struct gold{
         }
         return out;
     }
+    void advance(int N){
+        for (int i = 0; i < 16 * N; ++i) {
+            lfsr();
+        }
+    }
     void reset(){
         x1 = 1;
         x2 = 0x01234567u;
@@ -351,7 +362,7 @@ struct gold{
             lfsr();
     }
 };
-inline void pilot_fill(slot& sl, gold& gen, cv32 grid) {
+inline void pilot_fill(gold& gen, slot& sl, cv32 grid) {
     for (pRB& rb : sl.rb_vec) {
         u16 bits = gen.step();
         for (u8 i = 0; i < 6; ++i) {
@@ -410,8 +421,16 @@ public:
         refgen.reset();
 
     }
+    void skip_slot(int n){
+        refgen.advance(n * nRB);
+    }
     float noise_val(u16 rb_idx){
         return stats[rb_idx].noise;
+    }
+    void reset() {
+        refgen.reset();
+        for (auto& s : stats)
+            s = rx_stats{};
     }
     std::vector<rx_stats> stats;
 private:
@@ -480,7 +499,7 @@ inline void makePSS(cf32* out) {
         out[n] = cf32(std::cos(phase), std::sin(phase));
     }
 }
-inline void pss_fill(slot& sl, const cf32* pss, cv32 grid) {
+inline void pss_fill(const cf32* pss, slot& sl, cv32 grid) {
     if (sl.sltnmb != 0)
         return;
 
@@ -500,8 +519,46 @@ inline void pss_fill(slot& sl, const cf32* pss, cv32 grid) {
 }
 
 // control and management section
-// TBD
+inline void ctrl_fill(u8 slot_number, const slot& sl, cv32 grid) {
+    u8 code[2] = {u8(slot_number << 5), 0};
+    bch_encode(code, bch15_5);
+    u16 bits = (u16(code[0]) << 8) | code[1];
 
+    size_t _nRB = sl.rb_vec.size();
+    const pRB& rb = sl.rb_vec[ _nRB/ 2 + (_nRB & 1u)];
+    for (u16 i = 0; i < 12; ++i) {
+        if(rb.get_label(i, 1) == RE_type::ctrl){
+            grid[rb(i, 1)] = mapQPSK(bits >> 14);
+            bits <<= 2;
+        }
+    }
+}
+
+// Expects an equalized grid; returns the closest candidate without a confidence check.
+inline u8 ctrl_decode(const slot& sl, cv32 grid) {
+    float best_distance = 1e6;
+    u8 best_slot = 0;
+
+    size_t _nRB = sl.rb_vec.size();
+    const pRB& rb = sl.rb_vec[ _nRB/ 2 + (_nRB & 1u)];
+    for (u8 candidate = 0; candidate < 8; ++candidate) {
+        u8 code[2] = {u8(candidate << 5), 0};
+        bch_encode(code, bch15_5);
+        u16 bits = (u16(code[0]) << 8) | code[1];
+        float distance = 0;
+        for (u16 i = 0; i < 12; ++i) {
+            if (rb.get_label(i, 1) == RE_type::ctrl) {
+                distance += std::norm(cf32(grid[rb(i, 1)]) - mapQPSK(bits >> 14));
+                bits <<= 2;
+            }
+        }
+        if (distance < best_distance) {
+            best_distance = distance;
+            best_slot = candidate;
+        }
+    }
+    return best_slot;
+}
 // runnables:
 struct slot_mapper:runnable{
 slot_mapper(scheduler* sch, pipebuf<u8>& _in,
@@ -522,11 +579,12 @@ slot_mapper(scheduler* sch, pipebuf<u8>& _in,
             slot& sl = !prev_active? primary:secondary;
             if(sl.capacity() > in.readable() || grid.writable() < cfg.nSC * cfg.nSym)
                 return;
-            pss_fill(sl, pss, grid.wr_c());
-            pilot_fill(sl, pltGen, grid.wr_c());
-            /*
-            management fill: TBD
-            */
+            pss_fill(pss, sl, grid.wr_c());
+            pilot_fill(pltGen, sl, grid.wr_c());
+            
+            //management fill: TBD
+            ctrl_fill(slot_number, sl, grid.wr_c());
+            
 
             u16 index;
             u8 symbol;
@@ -546,10 +604,16 @@ slot_mapper(scheduler* sch, pipebuf<u8>& _in,
             cv32 g = grid.wr_c();
             for (size_t i = 0; i < size_t(cfg.nSC) * cfg.nSym; ++i)
                 g[i] = cf32(0.0f);
+            pltGen.advance(cfg.nRB);
         }
         slot_number = (++slot_number) & 0x7;
         if (slot_number == 0) pltGen.reset();
         grid.written(cfg.nSC * cfg.nSym);
+    }
+    void set_sltn(u8 n){
+        slot_number = n;
+        pltGen.reset();
+        pltGen.advance(cfg.nRB * n);
     }
 private:
     const link_cfg& cfg;
@@ -564,7 +628,24 @@ private:
     
 };
 
+struct meta_timing{
+    u8 sltn = 0;  // latest update 
+    u32 processed_grids = 0;        // total grids processed
+    u32 successful_total = 0;       // numbe rof successful slt_number decodings
+    bool successful_last = false;   // whether the last decoding was successful
+    void update(bool status, u8 _sltn){
+        processed_grids++;
+        if(status){
+            successful_last = true;
+            successful_total++;
+            sltn = _sltn;
+        }
+        else successful_last = false;
+
+    }
+};
 struct slot_demapper:runnable{
+    meta_timing mt;
     slot_demapper(scheduler* sch, pipebuf_c<float>& _grid,
     pipebuf<u8>& _out, const link_cfg& _cfg):
     runnable(sch, "SLOT_DEMAP"),
@@ -573,19 +654,39 @@ struct slot_demapper:runnable{
     secondary(1, _cfg.nRB),
     out(_out, int(22e3)),
     grid(_grid), eq(_cfg){}
+    void acquire() {
+        state = mode::acquiring;
+    }
     void run() override{
+        const size_t count = cfg.nSC * cfg.nSym;
+        if (grid.readable() < count) return;
+
+        switch (state) {
+        case mode::acquiring:
+            if (primary.capacity() > out.writable()) return;
+            if (!acquisition_mode()) {
+                mt.update(false, slot_number);
+                grid.read(count);
+                return;
+            }
+            state = mode::tracking;
+            break;
+        case mode::tracking:
+            break;
+        }
         bool active = (cfg.slot_mask >> (7-slot_number)) & 1u;
         bool prev_active = (cfg.slot_mask >> (8 - slot_number)) & 1u;
         if(active){
             slot& sl = !prev_active? primary:secondary;
             // capacity check
-            if (grid.readable() < cfg.nSC * cfg.nSym || sl.capacity() > out.writable())
+            if (sl.capacity() > out.writable())
                 return;
 
             //pilot extraction - ref slot filling and phase compensation
             cv32 g = grid.rd_c();
             eq.process(sl, g);
-
+            // management decoding
+            mt.update(sltn_check(), slot_number);
             // soft demapping
             u8 llr_val[6];
             u8* wr = out.wr();
@@ -605,19 +706,62 @@ struct slot_demapper:runnable{
             out.written(consumed);
             sl.reset(); 
         }else{
-            if (grid.readable() < cfg.nSC * cfg.nSym) return;
+            eq.skip_slot(1);
+            mt.update(false, slot_number);
         } 
-        slot_number = (++slot_number) & 0x7;
+        slot_number = (slot_number + 1) & 0x7;
         if (slot_number == 0) eq.reset_pilots();
-        grid.read(cfg.nSC * cfg.nSym);
+        grid.read(count);
+        
     }
     symbol_observer_t observe_symbol = nullptr;
     void* observer_context = nullptr;
     const std::vector<rx_stats>& equalizer_stats() const {
     return eq.stats;
     }
+    bool acquisition_mode(){
+        std::vector<float> scores(8, 1e6f);
+        size_t gsize = cfg.nSC * cfg.nSym;
+        cv32 g = grid.rd_c();
+        std::vector<float> re(gsize), im(gsize);
+        cv32 trial{re.data(), im.data()};
+        u8 pattern = cfg.slot_mask;
+        equalizer _eq(cfg);
 
+        for(int i = 0; i < 8; ++i){
+            if(((pattern >> (7 - i)) & 1u) == 0)continue;
+        _eq.reset();
+        _eq.skip_slot(i);
+        std::memcpy(trial.re, g.re, gsize * sizeof(float));
+        std::memcpy(trial.im, g.im, gsize * sizeof(float));
+        _eq.process(primary, trial);
+        u8 h_number = ctrl_decode(primary, trial);
+        if (h_number!=i) continue;
+        float mean_noise = 0;
+        for(u8 j = 0; j < cfg.nRB; ++j)
+            mean_noise += _eq.stats[j].noise;
+        scores[i] = mean_noise/(float)cfg.nRB;  
+        }
+    u8 best = 0;
+    for(u8 j = 0; j < 8; ++j){
+        if (scores[j] < scores[best]) best = j;
+    }
+    if (scores[best] > 0.25) return false; // huristic
+    slot_number = best;
+    eq.reset();
+    eq.skip_slot(best);
+    return true;
+    }
+    bool sltn_check(){
+        u8 _hypot = ctrl_decode(primary, grid.rd_c());
+        return (slot_number == _hypot);
+    }
 private:
+    enum class mode : u8 {
+        acquiring,
+        tracking
+    };
+    mode state = mode::acquiring;
     const link_cfg& cfg;
     slot primary;
     slot secondary;

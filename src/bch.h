@@ -23,6 +23,12 @@ struct bch_config {
     }
 };
 
+static constexpr bch_config bch15_5{
+    4, 15, 5, 3,   // M, N, K, T
+    0x03,           // Primitive: x^4 + x + 1
+    0x537ULL        // Generator, degree 10
+};
+
 static constexpr bch_config bch63_36{
     6, 63, 36, 5,   // M, N, K, T
     0x03,           // Primitive: x^6 + x + 1

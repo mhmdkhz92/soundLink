@@ -16,29 +16,8 @@
 
 namespace soundlink {
 
-struct tx_channel {
-    virtual size_t available() = 0;
-    virtual const float* samples() = 0;
-    virtual void consume(size_t count) = 0;
-    virtual void step() = 0;
-
-    virtual ~tx_channel() = default;
-};
-struct rx_channel {
-    virtual size_t writable() = 0;
-    virtual float* samples() = 0;
-    virtual void written(size_t count) = 0;
-    virtual void step() = 0;
-
-    virtual ~rx_channel() = default;
-};
 
 struct txdata_ch:tx_channel{
-private:
-    scheduler sch;
-    const link_cfg cfg;
-
-public:
     txdata_ch(const link_cfg& c, TxMessage& message)
         : sch(), cfg(c),
           data(&sch, "data", 8096),
@@ -72,6 +51,8 @@ public:
     txdata_ch& operator=(const txdata_ch&) = delete;
 
 private:
+    scheduler sch;
+    const link_cfg cfg;
     pipebuf<u8> data;
     pipebuf<u8> coded;
     pipebuf<u8> mixed;
@@ -92,11 +73,6 @@ private:
 
 
 struct txctrl_ch:tx_channel {
-private:
-    scheduler sch;
-    const link_cfg cfg;
-
-public:
     txctrl_ch(const link_cfg& c, TxctrlQueue& controls)
         : sch(), cfg(c),
           data(&sch, "data", 8096),
@@ -130,6 +106,8 @@ public:
     txctrl_ch& operator=(const txctrl_ch&) = delete;
 
 private:
+    scheduler sch;
+    const link_cfg cfg;
     pipebuf<u8> data;
     pipebuf<u8> coded;
     pipebuf<u8> mixed;
@@ -149,14 +127,42 @@ private:
     duc up;
 };
 
-struct rxdata_ch:rx_channel {
-private:
-    scheduler sch;
-    const link_cfg cfg;
-    pipebuf<float> audio;
-    pipewriter<float> input;
 
-public:
+struct rx_stamp {
+    frame_timing ft;
+    bool valid = false;
+    rx_stamp(const link_cfg& cfg)
+        : ratio(48000.0 / cfg.sr), offset(0) {
+        // DDC sample alignment derived from the current filter implementation.
+        switch (cfg.bw) {
+        case BW::BW1_4: offset = 168.0; break;
+        case BW::BW3:   offset = 103.5; break;
+        case BW::BW5:   offset = 32.5; break;
+        case BW::BW10:  offset = 15.75; break;
+        }
+    }
+    void update(const pss_tracker& pt, const meta_timing& mt) {
+        if (mt.processed_grids == checked_grid)
+            return;
+        checked_grid = mt.processed_grids;
+        if (!pt.pss_valid || !mt.successful_last)
+            return;
+        if (mt.processed_grids < pt.pss_grid)
+            return;
+        u32 elapsed = mt.processed_grids - pt.pss_grid;
+        ft.slot_number = (mt.sltn + 8 - (elapsed & 7u)) & 7u;
+
+        ft.sample = static_cast<uint64_t>(
+            std::llround(double(pt.pss_sample) * ratio + offset));
+        valid = true;
+    }
+
+private:
+    double ratio;
+    double offset;
+    u32 checked_grid = 0;
+};
+struct rxdata_ch:rx_channel {
 
     rxdata_ch(const link_cfg& c, RxMessage& message, TxctrlQueue& controls)
         : sch(), cfg(c),
@@ -174,7 +180,8 @@ public:
           conv(&sch, bits, mixed, cfg.cr),
           shuffle(&sch, mixed, coded),
           bch(&sch, coded, data),
-          sink(&sch, data, message, controls) {}
+          sink(&sch, data, message, controls),
+          stamp(cfg) {}
 
     size_t writable() override {
         return input.writable();
@@ -185,12 +192,24 @@ public:
     void written(size_t count) override {
         input.written(count);
     }
-    void step() override { sch.step(); }
+    void step() override {
+        sch.step();
+        stamp.update(ofdm.pt, mapper.mt);
+    }
+    bool get_stamp(frame_timing& ft) override {
+        if (!stamp.valid) return false;
+        ft = stamp.ft;
+        return true;
+    }
 
     rxdata_ch(const rxdata_ch&) = delete;
     rxdata_ch& operator=(const rxdata_ch&) = delete;
 
 private:
+    scheduler sch;
+    const link_cfg cfg;
+    pipebuf<float> audio;
+    pipewriter<float> input;
     pipebuf_c<float> wave;
     pipebuf_c<float> grid;
     pipebuf<u8> bits;
@@ -205,17 +224,11 @@ private:
     deinterleaver<127, 24> shuffle;
     bch_decoder<bch127_106> bch;
     mrx_store sink;
+    rx_stamp stamp;
 };
 
 
 struct rxctrl_ch:rx_channel {
-private:
-    scheduler sch;
-    const link_cfg cfg;
-    pipebuf<float> audio;
-    pipewriter<float> input;
-
-public:
     rxctrl_ch(const link_cfg& c, rxCtrlQueue& controls)
         : sch(), cfg(c),
           audio(&sch, "audio", 48000),
@@ -232,7 +245,8 @@ public:
           conv(&sch, bits, mixed, cfg.cr),
           shuffle(&sch, mixed, coded),
           bch(&sch, coded, data),
-          sink(&sch, data, controls) {}
+          sink(&sch, data, controls),
+          stamp(cfg) {}
 
     size_t writable() override {
         return input.writable();
@@ -243,12 +257,24 @@ public:
     void written(size_t count) override {
         input.written(count);
     }
-    void step() override { sch.step(); }
+    void step() override {
+        sch.step();
+        stamp.update(ofdm.pt, mapper.mt);
+    }
+    bool get_stamp(frame_timing& ft) override {
+        if (!stamp.valid) return false;
+        ft = stamp.ft;
+        return true;
+    }
 
     rxctrl_ch(const rxctrl_ch&) = delete;
     rxctrl_ch& operator=(const rxctrl_ch&) = delete;
 
 private:
+    scheduler sch;
+    const link_cfg cfg;
+    pipebuf<float> audio;
+    pipewriter<float> input;
     pipebuf_c<float> wave;
     pipebuf_c<float> grid;
     pipebuf<u8> bits;
@@ -263,54 +289,10 @@ private:
     deinterleaver<63, 8> shuffle;
     bch_decoder<bch63_36> bch;
     ctrl_store sink;
+    rx_stamp stamp;
 };
 
-inline void mix_audio(const std::vector<tx_channel*>& tx, ma_pcm_rb& playback) {
-    if (tx.empty()) return;
-    size_t count = ma_pcm_rb_available_write(&playback);
 
-    for (auto* channel : tx)
-        count = std::min(count, channel->available());
-
-    const float gain = 1.0f / float(tx.size());
-
-    while (count > 0) {
-        ma_uint32 frames = static_cast<ma_uint32>(count);
-        void* memory = nullptr;
-        ma_pcm_rb_acquire_write(&playback, &frames, &memory);
-
-        float* output = static_cast<float*>(memory);
-        std::fill_n(output, frames, 0.0f);
-
-        for (auto* channel : tx) {
-            ma_mix_pcm_frames_f32(output, channel->samples(), frames, 1, gain);
-            channel->consume(frames);
-        }
-        ma_pcm_rb_commit_write(&playback, frames);
-        count -= frames;
-    }
-}
-
-inline void read_mic(const std::vector<rx_channel*>& rx, ma_pcm_rb& capture) {
-    if (rx.empty()) return;
-    size_t count = ma_pcm_rb_available_read(&capture);
-
-    for (auto* channel : rx)
-        count = std::min(count, channel->writable());
-
-    while (count > 0) {
-        ma_uint32 frames = static_cast<ma_uint32>(count);
-        void* memory = nullptr;
-        ma_pcm_rb_acquire_read(&capture, &frames, &memory);
-
-        for (auto* channel : rx) {
-            std::memcpy(channel->samples(), memory, frames * sizeof(float));
-            channel->written(frames);
-        }
-        ma_pcm_rb_commit_read(&capture, frames);
-        count -= frames;
-    }
-}
 
 } // namespace soundlink
 

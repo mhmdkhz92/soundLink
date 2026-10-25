@@ -6,8 +6,10 @@
 #include <filesystem>
 #include <cstdint>
 #include <vector>
+#include <string>
 #include <stdexcept>
 #include <cstring>
+#include <bitset>
 #include "framework.h"
 
 namespace soundlink{
@@ -17,7 +19,7 @@ constexpr uint8_t packet_marker = 0xD3;
 // create control packets
 enum class ctrl_type:uint8_t {
     hello, hello_ack, probe_report, config,
-    config_ack, file_info, file_ack, ack,
+    config_ack, ack, timing_adj,
     close, close_ack
 };
 // packet type
@@ -52,9 +54,16 @@ struct TxFrame {
     uint8_t tx_count = 0;
 };
 struct file_info {
+    std::string file_name;
     uint32_t file_size;
     uint8_t segment_size;
 };
+struct channel_info {
+    uint8_t fc;
+    uint8_t code_rate;
+    uint8_t bandwidth;
+};
+using chinfo = std::vector<channel_info>;
 
 struct ack {
     uint16_t base;
@@ -67,7 +76,146 @@ struct ctrl_packet {
     std::vector<uint8_t> fields;
     uint32_t tx_count = 0;
 };
+struct ctrl_factory {
+    static ctrl_packet hello(const file_info& info);
+    static ctrl_packet hello_ack(uint16_t sequence);
+    static ctrl_packet probe_report(const std::vector<uint8_t>& snr);
+    static ctrl_packet config(const chinfo& data_channels, const chinfo& ctrl_channels);
+    static ctrl_packet config_ack(uint16_t sequence);
+    static ctrl_packet timing_adjustment(int16_t samples);
+    static ctrl_packet close();
+    static ctrl_packet close_ack(uint16_t sequence);
+};
 
+// Fields: [file size:4B, big-endian][segment size:1B][filename bytes].
+inline ctrl_packet ctrl_factory::hello(const file_info& info) {
+    if (info.file_name.size() > 249)
+        throw std::runtime_error("Filename exceeds hello packet capacity");
+
+    ctrl_packet packet{};
+    packet.type = ctrl_type::hello;
+    packet.fields = {uint8_t(info.file_size >> 24),
+        uint8_t(info.file_size >> 16),
+        uint8_t(info.file_size >> 8),
+        uint8_t(info.file_size),
+        info.segment_size
+    };
+    packet.fields.insert(packet.fields.end(),info.file_name.begin(), info.file_name.end());
+    return packet;
+}
+inline file_info read_hello(const ctrl_packet& packet) {
+    if (packet.type != ctrl_type::hello || packet.fields.size() < 5)
+        throw std::runtime_error("Invalid hello packet");
+
+    const auto& f = packet.fields;
+    file_info info;
+    info.file_size = (uint32_t(f[0]) << 24)
+                   | (uint32_t(f[1]) << 16)
+                   | (uint32_t(f[2]) << 8)
+                   | uint32_t(f[3]);
+    info.segment_size = f[4];
+    info.file_name.assign(f.begin() + 5, f.end());
+    return info;
+}
+inline ctrl_packet ctrl_factory::hello_ack(uint16_t sequence) {
+    ctrl_packet packet{};
+    packet.type = ctrl_type::hello_ack;
+    packet.fields = {
+        uint8_t(sequence >> 8),
+        uint8_t(sequence)
+    };
+    return packet;
+}
+
+// One byte per channel, in probing order: SNR in dB = value * 30 / 255.
+inline ctrl_packet ctrl_factory::probe_report(const std::vector<uint8_t>& snr) {
+    ctrl_packet packet{};
+    packet.type = ctrl_type::probe_report;
+    packet.fields = snr;
+    return packet;
+}
+// Fields: [data count:1B][ctrl count:1B]
+// Followed by data channels, then control channels.
+// Each channel: [fc:1B][code rate:1B][bandwidth:1B]
+inline ctrl_packet ctrl_factory::config(
+    const chinfo& data_channels, const chinfo& ctrl_channels) {
+
+    if (data_channels.size() + ctrl_channels.size() > 84)
+        throw std::runtime_error("Too many channels for config packet");
+
+    ctrl_packet packet{};
+    packet.type = ctrl_type::config;
+    packet.fields = {
+        uint8_t(data_channels.size()),
+        uint8_t(ctrl_channels.size())
+    };
+
+    for (const auto& ch : data_channels)
+        packet.fields.insert(packet.fields.end(), {ch.fc, ch.code_rate, ch.bandwidth});
+
+    for (const auto& ch : ctrl_channels)
+        packet.fields.insert(packet.fields.end(), {ch.fc, ch.code_rate, ch.bandwidth});
+    return packet;
+}
+inline void read_config(const ctrl_packet& packet, chinfo& data_channels, chinfo& ctrl_channels) {
+    const auto& f = packet.fields;
+
+    if (packet.type != ctrl_type::config || f.size() < 2)
+        throw std::runtime_error("Invalid config packet");
+
+    size_t data_count = f[0];
+    size_t ctrl_count = f[1];
+
+    if (f.size() != 2 + 3 * (data_count + ctrl_count))
+        throw std::runtime_error("Invalid config length");
+
+    data_channels.clear();
+    ctrl_channels.clear();
+
+    size_t offset = 2;
+    for (size_t i = 0; i < data_count; ++i) {
+        data_channels.push_back({f[offset], f[offset + 1], f[offset + 2]});
+        offset += 3;
+    }
+    for (size_t i = 0; i < ctrl_count; ++i) {
+        ctrl_channels.push_back({f[offset], f[offset + 1], f[offset + 2]});
+        offset += 3;
+    }
+}
+inline ctrl_packet ctrl_factory::config_ack(uint16_t sequence) {
+    ctrl_packet packet{};
+    packet.type = ctrl_type::config_ack;
+    packet.fields = {
+        uint8_t(sequence >> 8),
+        uint8_t(sequence)
+    };
+    return packet;
+}
+inline ctrl_packet ctrl_factory::timing_adjustment(int16_t samples) {
+    uint16_t value = static_cast<uint16_t>(samples);
+
+    ctrl_packet packet{};
+    packet.type = ctrl_type::timing_adj;
+    packet.fields = {
+        uint8_t(value >> 8),
+        uint8_t(value)
+    };
+    return packet;
+}
+inline ctrl_packet ctrl_factory::close() {
+    ctrl_packet packet{};
+    packet.type = ctrl_type::close;
+    return packet;
+}
+inline ctrl_packet ctrl_factory::close_ack(uint16_t sequence) {
+    ctrl_packet packet{};
+    packet.type = ctrl_type::close_ack;
+    packet.fields = {
+        uint8_t(sequence >> 8),
+        uint8_t(sequence)
+    };
+    return packet;
+}
 struct TxMessage {
     std::vector<uint8_t> payload;
     TxMessage(const std::filesystem::path& path, size_t max_len):
@@ -140,9 +288,11 @@ struct RxMessage {
     std::vector<bool> received;
     size_t segment_size;
     size_t received_count = 0;
+    std::filesystem::path path;
 
-    RxMessage(size_t file_size, size_t segment_size)
-        : segment_size(segment_size) {
+    RxMessage(std::filesystem::path _path, size_t file_size, size_t segment_size)
+        : segment_size(segment_size),
+        path(_path){
         if (file_size > 10u * 1024 * 1024)
             throw std::invalid_argument("File exceeds 10 MiB");
 
@@ -168,7 +318,7 @@ struct RxMessage {
         received[sequence] = true;
         ++received_count;
     }
-    void flush_to_file(const std::filesystem::path& path){
+    void flush_to_file(){
         if (received_count != received.size())
             throw std::runtime_error("Cannot save incomplete message");
         std::ofstream file(path, std::ios::binary | std::ios::trunc);
@@ -291,9 +441,11 @@ struct rxCtrlQueue {
     rxCtrlQueue(size_t m) : maxqueue(m) {}
 
     bool push(ctrl_packet packet) {
+        if(received[packet.sequence]) return true;
         if (packets.size() >= maxqueue)
             return false;
-
+        
+        received[packet.sequence] = true;
         packets.push_back(std::move(packet));
         return true;
     }
@@ -315,6 +467,7 @@ struct rxCtrlQueue {
 private:
     std::vector<ctrl_packet> packets;
     size_t maxqueue;
+    std::bitset<65536> received;
 };
 // CRC GEN
 inline uint32_t crc32c(const uint8_t* data, size_t length) {
