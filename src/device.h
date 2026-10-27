@@ -19,6 +19,7 @@ struct tx_channel {
     virtual const float* samples() = 0;
     virtual void consume(size_t count) = 0;
     virtual void step() = 0;
+    virtual bool run() = 0;
     virtual ~tx_channel() = default;
 };
 struct frame_timing;
@@ -74,6 +75,11 @@ struct audio_device {
         if (ma_device_stop(&device) != MA_SUCCESS)
             throw std::runtime_error("Cannot stop audio device");
     }
+    void play(){
+        m = mode::play;
+        tx_stamp.sample = 24000;
+        tx_stamp.slot_number = 1;
+        }
 
     void mix_audio(const std::vector<tx_channel*>& tx) {
         bool mix = false;

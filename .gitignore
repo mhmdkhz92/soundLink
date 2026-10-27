@@ -3,6 +3,9 @@
 *.code-workspace
 sanity*/
 
+# Local GUI
+/gui/
+
 # C/C++ build directories
 build/
 Build/

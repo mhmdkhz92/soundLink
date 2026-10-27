@@ -35,13 +35,10 @@ struct link_cfg{
     u16 nFFT;               // number of FFT points
     u16 nSym;               // number of symbols ber slot
     u16 cp;                 // number of cyclic prefix points
-    u8 slot_mask;           // active/silent pattern
-    code_rate cr;
-    link_cfg(int _fc, BW _bw, code_rate _cr, u8 _sm)
-    :fc(_fc),
-    nSym(NSYM_PER_RB),
-    slot_mask(_sm),
-    cr(_cr){
+    code_rate cr;           // convolutional rate
+    modulation mod;           // modulation type
+    link_cfg(int _fc, BW _bw, code_rate _cr, modulation _m = modulation::QPSK)
+    :fc(_fc), nSym(NSYM_PER_RB), cr(_cr), mod(_m){
         switch (_bw){
         case BW::BW1_4:
             bw = BW::BW1_4; bandwidth = 1.4e3; nRB = 6; nFFT = 128;
@@ -72,8 +69,10 @@ struct rx_stats{
 };
 struct pRB{
     const u16 idx;
-    modulation m = modulation::QPSK;
-    pRB(u16 _idx, u16 _nRB): idx(_idx), nRB(_nRB){
+    const u16 nRB;
+    modulation m;
+    pRB(u16 _idx, u16 _nRB, modulation _m)
+    :idx(_idx), nRB(_nRB), m(_m){
         for(size_t i = 0; i < 12*nSym; ++i)
             layout[i] = RE_type::D;
         for(size_t i = 0; i < 6; ++i)
@@ -122,7 +121,6 @@ struct pRB{
         return dataRE_num * static_cast<u16>(m);
     }
 private:
-    const u16 nRB;
     static const u16 nSym = NSYM_PER_RB;
     RE_type layout[12 * nSym];
     u16 data_idx = 0;
@@ -132,10 +130,11 @@ private:
 struct slot{
     u16 sltnmb;
     std::vector<pRB> rb_vec;
-    slot(u16 _sltnmb, u16 _nRB): sltnmb(_sltnmb){
+    slot(u16 _sltnmb, u16 _nRB, modulation _m)
+    :sltnmb(_sltnmb){
         rb_vec.reserve(_nRB);  
         for (u16 idx = 0; idx < _nRB; ++idx)
-            rb_vec.push_back(pRB(idx, _nRB));
+            rb_vec.push_back(pRB(idx, _nRB, _m));
 
         pRB& rb = rb_vec[_nRB / 2 + (_nRB & 1u)];
         for (u16 i = 0; i < 12; ++i) {
@@ -562,19 +561,22 @@ inline u8 ctrl_decode(const slot& sl, cv32 grid) {
 // runnables:
 struct slot_mapper:runnable{
 slot_mapper(scheduler* sch, pipebuf<u8>& _in,
-    pipebuf_c<float>& _grid, const link_cfg& _cfg):
+    pipebuf_c<float>& _grid, const link_cfg& _cfg, u8 mask):
     runnable(sch, "SLOT_MAP"),
     cfg(_cfg),
-    primary(0, _cfg.nRB),
-    secondary(1, _cfg.nRB),
+    primary(0, _cfg.nRB, cfg.mod),
+    secondary(1, _cfg.nRB, cfg.mod),
+    slot_mask(mask),
     in(_in),
-    grid(_grid, _cfg.nSC * _cfg.nSym),
-    maps{nullptr, mapBPSK, mapQPSK, nullptr, mapQAM16, nullptr, mapQAM64}{
+    grid(_grid, _cfg.nSC * _cfg.nSym)
+    {
+        mod_t maps[] = {nullptr, mapBPSK, mapQPSK, nullptr, mapQAM16, nullptr, mapQAM64};
+        map = maps[(int)cfg.mod];
         makePSS(pss);
     }
     void run() override{
-        bool active = (cfg.slot_mask >> (7-slot_number)) & 1u;
-        bool prev_active = (cfg.slot_mask >> (8 - slot_number)) & 1u;
+        bool active = (slot_mask >> (7-slot_number)) & 1u;
+        bool prev_active = (slot_mask >> (8 - slot_number)) & 1u;
         if(active){
             slot& sl = !prev_active? primary:secondary;
             if(sl.capacity() > in.readable() || grid.writable() < cfg.nSC * cfg.nSym)
@@ -593,7 +595,7 @@ slot_mapper(scheduler* sch, pipebuf<u8>& _in,
                 u8 bits = static_cast<u8>(rb.m);
                 while (rb.nextData(index)) {
                     in.read_bits(&symbol, bits);
-                    g[index] = maps[bits](symbol >> (8 - bits));
+                    g[index] = map(symbol >> (8 - bits));
                 }
             }
             sl.reset();
@@ -620,11 +622,12 @@ private:
     slot primary;
     slot secondary;
     u8 slot_number = 0;
+    u8 slot_mask;
     gold pltGen;
     cf32 pss[62];
     pipereader_bit in;
     pipewriter<float> grid;
-    mod_t maps[7];
+    mod_t map;
     
 };
 
@@ -647,11 +650,12 @@ struct meta_timing{
 struct slot_demapper:runnable{
     meta_timing mt;
     slot_demapper(scheduler* sch, pipebuf_c<float>& _grid,
-    pipebuf<u8>& _out, const link_cfg& _cfg):
+    pipebuf<u8>& _out, const link_cfg& _cfg, u8 mask):
     runnable(sch, "SLOT_DEMAP"),
     cfg(_cfg),
-    primary(0, _cfg.nRB),
-    secondary(1, _cfg.nRB),
+    primary(0, _cfg.nRB, cfg.mod),
+    secondary(1, _cfg.nRB, cfg.mod),
+    slot_mask(mask),
     out(_out, int(22e3)),
     grid(_grid), eq(_cfg){}
     void acquire() {
@@ -674,8 +678,8 @@ struct slot_demapper:runnable{
         case mode::tracking:
             break;
         }
-        bool active = (cfg.slot_mask >> (7-slot_number)) & 1u;
-        bool prev_active = (cfg.slot_mask >> (8 - slot_number)) & 1u;
+        bool active = (slot_mask >> (7-slot_number)) & 1u;
+        bool prev_active = (slot_mask >> (8 - slot_number)) & 1u;
         if(active){
             slot& sl = !prev_active? primary:secondary;
             // capacity check
@@ -725,7 +729,7 @@ struct slot_demapper:runnable{
         cv32 g = grid.rd_c();
         std::vector<float> re(gsize), im(gsize);
         cv32 trial{re.data(), im.data()};
-        u8 pattern = cfg.slot_mask;
+        u8 pattern = slot_mask;
         equalizer _eq(cfg);
 
         for(int i = 0; i < 8; ++i){
@@ -766,6 +770,7 @@ private:
     slot primary;
     slot secondary;
     u8 slot_number = 0;
+    u8 slot_mask;
     pipewriter<u8> out;
     pipereader<float> grid;
     equalizer eq;

@@ -18,7 +18,7 @@ constexpr uint8_t packet_marker = 0xD3;
 
 // create control packets
 enum class ctrl_type:uint8_t {
-    hello, hello_ack, probe_report, config,
+    hello, hello_ack, config,
     config_ack, ack, timing_adj,
     close, close_ack
 };
@@ -62,6 +62,7 @@ struct channel_info {
     uint8_t fc;
     uint8_t code_rate;
     uint8_t bandwidth;
+    uint8_t mod;
 };
 using chinfo = std::vector<channel_info>;
 
@@ -79,7 +80,6 @@ struct ctrl_packet {
 struct ctrl_factory {
     static ctrl_packet hello(const file_info& info);
     static ctrl_packet hello_ack(uint16_t sequence);
-    static ctrl_packet probe_report(const std::vector<uint8_t>& snr);
     static ctrl_packet config(const chinfo& data_channels, const chinfo& ctrl_channels);
     static ctrl_packet config_ack(uint16_t sequence);
     static ctrl_packet timing_adjustment(int16_t samples);
@@ -128,19 +128,13 @@ inline ctrl_packet ctrl_factory::hello_ack(uint16_t sequence) {
 }
 
 // One byte per channel, in probing order: SNR in dB = value * 30 / 255.
-inline ctrl_packet ctrl_factory::probe_report(const std::vector<uint8_t>& snr) {
-    ctrl_packet packet{};
-    packet.type = ctrl_type::probe_report;
-    packet.fields = snr;
-    return packet;
-}
 // Fields: [data count:1B][ctrl count:1B]
 // Followed by data channels, then control channels.
-// Each channel: [fc:1B][code rate:1B][bandwidth:1B]
+// Each channel: [fc:1B][code rate:1B][bandwidth:1B][modulation:1B]
 inline ctrl_packet ctrl_factory::config(
     const chinfo& data_channels, const chinfo& ctrl_channels) {
 
-    if (data_channels.size() + ctrl_channels.size() > 84)
+    if (data_channels.size() + ctrl_channels.size() > 63)
         throw std::runtime_error("Too many channels for config packet");
 
     ctrl_packet packet{};
@@ -151,10 +145,10 @@ inline ctrl_packet ctrl_factory::config(
     };
 
     for (const auto& ch : data_channels)
-        packet.fields.insert(packet.fields.end(), {ch.fc, ch.code_rate, ch.bandwidth});
+        packet.fields.insert(packet.fields.end(), {ch.fc, ch.code_rate, ch.bandwidth, ch.mod});
 
     for (const auto& ch : ctrl_channels)
-        packet.fields.insert(packet.fields.end(), {ch.fc, ch.code_rate, ch.bandwidth});
+        packet.fields.insert(packet.fields.end(), {ch.fc, ch.code_rate, ch.bandwidth, ch.mod});
     return packet;
 }
 inline void read_config(const ctrl_packet& packet, chinfo& data_channels, chinfo& ctrl_channels) {
@@ -166,7 +160,7 @@ inline void read_config(const ctrl_packet& packet, chinfo& data_channels, chinfo
     size_t data_count = f[0];
     size_t ctrl_count = f[1];
 
-    if (f.size() != 2 + 3 * (data_count + ctrl_count))
+    if (f.size() != 2 + 4 * (data_count + ctrl_count))
         throw std::runtime_error("Invalid config length");
 
     data_channels.clear();
@@ -174,12 +168,12 @@ inline void read_config(const ctrl_packet& packet, chinfo& data_channels, chinfo
 
     size_t offset = 2;
     for (size_t i = 0; i < data_count; ++i) {
-        data_channels.push_back({f[offset], f[offset + 1], f[offset + 2]});
-        offset += 3;
+        data_channels.push_back({f[offset], f[offset + 1], f[offset + 2], f[offset + 3]});
+        offset += 4;
     }
     for (size_t i = 0; i < ctrl_count; ++i) {
-        ctrl_channels.push_back({f[offset], f[offset + 1], f[offset + 2]});
-        offset += 3;
+        ctrl_channels.push_back({f[offset], f[offset + 1], f[offset + 2], f[offset + 3]});
+        offset += 4;
     }
 }
 inline ctrl_packet ctrl_factory::config_ack(uint16_t sequence) {
@@ -218,6 +212,7 @@ inline ctrl_packet ctrl_factory::close_ack(uint16_t sequence) {
 }
 struct TxMessage {
     std::vector<uint8_t> payload;
+    file_info metadata;
     TxMessage(const std::filesystem::path& path, size_t max_len):
         cursor(0),
         acked(0){
@@ -230,10 +225,13 @@ struct TxMessage {
         if (file_size < 0)
             throw std::runtime_error("Cannot determine file size");
         size_t size = static_cast<size_t>(file_size);
+        metadata.file_name = path.filename().u8string();
+        metadata.file_size = static_cast<uint32_t>(size);
+        metadata.segment_size = static_cast<u8>(max_len);
         
         if (size > max_size)
             throw std::runtime_error("File exceeds size limit");
-
+        
         payload.resize(size);
         file.seekg(0, std::ios::beg);
 
@@ -255,6 +253,7 @@ struct TxMessage {
             size -= len;
             offset += len;
         }
+
     }
     bool completed(){
         return acked == frames.size();
