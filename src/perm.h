@@ -104,8 +104,15 @@ struct deinterleaver : runnable {
             if(in.readable() < 32) return false;
             u8 marker[4];
             in.read_bits(marker, 32);
-            check = true;
-            return true;
+            window = (uint32_t(marker[0]) << 24)
+                   | (uint32_t(marker[1]) << 16)
+                   | (uint32_t(marker[2]) << 8)
+                   | uint32_t(marker[3]);
+            if (window == SYNC_WORD) {
+                check = true;
+                return true;
+            }
+            sync = false;
         }
 
         while(in.readable()){

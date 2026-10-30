@@ -18,8 +18,8 @@ constexpr uint8_t packet_marker = 0xD3;
 
 // create control packets
 enum class ctrl_type:uint8_t {
-    hello, hello_ack, config,
-    config_ack, ack, timing_adj,
+    hello, hello_ack, config, config_ack,
+    ack, timing_adj, timing_ack,
     close, close_ack
 };
 // packet type
@@ -68,7 +68,7 @@ using chinfo = std::vector<channel_info>;
 
 struct ack {
     uint16_t base;
-    std::vector<uint8_t> bitmap;
+    uint32_t bitmap = 0;
 };
 
 struct ctrl_packet {
@@ -77,12 +77,33 @@ struct ctrl_packet {
     std::vector<uint8_t> fields;
     uint32_t tx_count = 0;
 };
+
+// Fields: big-endian segment base followed by a 32-bit bitmap.
+inline std::vector<uint16_t> read_ack(const ctrl_packet& packet) {
+    if (packet.type != ctrl_type::ack || packet.fields.size() != 6)
+        throw std::runtime_error("Invalid ack packet");
+
+    uint16_t base = (uint16_t(packet.fields[0]) << 8) | packet.fields[1];
+    uint32_t bitmap = 0;
+    for (unsigned i = 0; i < 4; ++i)
+        bitmap = (bitmap << 8) | packet.fields[2 + i];
+
+    std::vector<uint16_t> segments;
+    for (unsigned bit = 0; bit < 32; ++bit) {
+        uint32_t segment = uint32_t(base) + bit;
+        if ((bitmap & (uint32_t{1} << bit)) && segment <= UINT16_MAX)
+            segments.push_back(static_cast<uint16_t>(segment));
+    }
+    return segments;
+}
+
 struct ctrl_factory {
     static ctrl_packet hello(const file_info& info);
     static ctrl_packet hello_ack(uint16_t sequence);
     static ctrl_packet config(const chinfo& data_channels, const chinfo& ctrl_channels);
     static ctrl_packet config_ack(uint16_t sequence);
     static ctrl_packet timing_adjustment(int16_t samples);
+    static ctrl_packet timing_ack(uint16_t sequence);
     static ctrl_packet close();
     static ctrl_packet close_ack(uint16_t sequence);
 };
@@ -196,6 +217,15 @@ inline ctrl_packet ctrl_factory::timing_adjustment(int16_t samples) {
     };
     return packet;
 }
+inline ctrl_packet ctrl_factory::timing_ack(uint16_t sequence) {
+    ctrl_packet packet{};
+    packet.type = ctrl_type::timing_ack;
+    packet.fields = {
+        uint8_t(sequence >> 8),
+        uint8_t(sequence)
+    };
+    return packet;
+}
 inline ctrl_packet ctrl_factory::close() {
     ctrl_packet packet{};
     packet.type = ctrl_type::close;
@@ -286,6 +316,7 @@ struct RxMessage {
     std::vector<uint8_t> payload;
     std::vector<bool> received;
     size_t segment_size;
+    size_t final_segment_size = 0;
     size_t received_count = 0;
     std::filesystem::path path;
 
@@ -298,6 +329,10 @@ struct RxMessage {
         if (segment_size == 0)
             throw std::invalid_argument("Invalid segment size");
 
+        final_segment_size = file_size % segment_size;
+        if (final_segment_size == 0 && file_size != 0)
+            final_segment_size = segment_size;
+
         const size_t segments = file_size /
          segment_size + (file_size % segment_size != 0);
 
@@ -308,14 +343,17 @@ struct RxMessage {
         received.resize(segments, false);
     }
     // True for valid segments, including duplicates so they can be ACKed again.
-    void store(size_t sequence, const void* input, size_t size){
-        if (sequence >= received.size()) return;
-        if (received[sequence]) return;
+    bool store(size_t sequence, const void* input, size_t size){
+        if (sequence >= received.size()) return false;
+        size_t expected = sequence == received.size() - 1? final_segment_size : segment_size;
+        if (size != expected) return false;
+        if (received[sequence]) return true;
         const size_t offset = sequence * segment_size;
     
         std::memcpy(payload.data() + offset, input, size);
         received[sequence] = true;
         ++received_count;
+        return true;
     }
     void flush_to_file(){
         if (received_count != received.size())
@@ -416,6 +454,14 @@ struct TxctrlQueue {
             return;
         }
     }
+    void remove_type(ctrl_type type) {
+        for (size_t i = 0; i < packets.size();) {
+            if (packets[i].type == type)
+                packets.erase(packets.begin() + i);
+            else
+                ++i;
+        }
+    }
     bool remove_ack() {
         auto selected = packets.end();
         for (auto it = packets.begin(); it != packets.end(); ++it) {
@@ -429,6 +475,9 @@ struct TxctrlQueue {
             return false;
         packets.erase(selected);
         return true;
+    }
+    size_t size(){
+        return packets.size();
     }
 private:
     std::vector<ctrl_packet> packets;
@@ -616,17 +665,9 @@ struct mrx_store:runnable{
                 continue;
             }
             uint16_t segment = uint16_t(rd[2] << 8) | uint16_t(rd[3]);
-            if(segment >= rx.received.size()){
-                in.read(1);
-                continue;
-            }
             size_t length = size_t(rd[4]);
-            if (length == 0 || length > rx.segment_size){
-                in.read(1);
-                continue;
-            }
-            rx.store(segment, rd + 5, length);
-            tctrl.push_ack(segment);
+            if (rx.store(segment, rd + 5, length))
+                tctrl.push_ack(segment);
             in.read(offset + 9 + length);
         }
     }

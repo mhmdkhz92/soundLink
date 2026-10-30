@@ -106,7 +106,8 @@ struct ddc:runnable{
 public:
     ddc(scheduler *sch,  pipebuf<float> &_in, pipebuf_c<float> &_out, const link_cfg& _cfg)
     :runnable(sch, "ddc"),in(_in), out(_out), cfg(_cfg),
-    lut(5e3, _cfg.sr, 48u << static_cast<unsigned>(_cfg.bw)){
+    lut(cfg.fc * 1000.0f, cfg.sr, 48u << (unsigned)cfg.bw){
+        float fc = cfg.fc * 1000.0f;
         up = 1u << static_cast<unsigned>(cfg.bw); // 1, 2, 4, 8
         down = 25;
     
@@ -122,7 +123,7 @@ public:
         im_filt = new float[up*phaseLen]{};
         for(size_t i = 0; i < up; i++){
             for(size_t j = 0; j < phaseLen; ++j){
-                float angle = 2.0f * pi * cfg.fc * (float)(i + up * j) / (48000.0f * (float)up);
+                float angle = 2.0f * pi * fc * (float)(i + up * j) / (48000.0f * (float)up);
                 re_filt[phaseLen * (i + 1) - 1 - j] = 2*h[i + up * j] * std::cos(angle);
                 im_filt[phaseLen * (i + 1) - 1 - j] = 2*h[i + up * j] * std::sin(angle);     
             }

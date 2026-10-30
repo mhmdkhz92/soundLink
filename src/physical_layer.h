@@ -18,9 +18,9 @@ constexpr u16 NSYM_PER_RB = 6;
 
 typedef cf32 (*mod_t)(u8);
 // defines
-enum class BW{
+enum BW{
     BW1_4, BW3, BW5, BW10};
-enum class modulation{
+enum modulation{
     BPSK = 1, QPSK = 2, QAM16 = 4, QAM64 = 6};
 enum class RE_type :u8{
     D, plt, PSS, ctrl, unused};
@@ -37,20 +37,20 @@ struct link_cfg{
     u16 cp;                 // number of cyclic prefix points
     code_rate cr;           // convolutional rate
     modulation mod;           // modulation type
-    link_cfg(int _fc, BW _bw, code_rate _cr, modulation _m = modulation::QPSK)
+    link_cfg(int _fc, BW _bw, code_rate _cr, modulation _m = QPSK)
     :fc(_fc), nSym(NSYM_PER_RB), cr(_cr), mod(_m){
         switch (_bw){
-        case BW::BW1_4:
-            bw = BW::BW1_4; bandwidth = 1.4e3; nRB = 6; nFFT = 128;
+        case BW1_4:
+            bw = BW1_4; bandwidth = 1.4e3; nRB = 6; nFFT = 128;
             break;
-        case BW::BW3:
-            bw = BW::BW3; bandwidth = 3e3; nRB = 15; nFFT = 256;
+        case BW3:
+            bw = BW3; bandwidth = 3e3; nRB = 15; nFFT = 256;
             break;
-        case BW::BW5:
-            bw = BW::BW5; bandwidth = 5e3; nRB = 25; nFFT = 512;
+        case BW5:
+            bw = BW5; bandwidth = 5e3; nRB = 25; nFFT = 512;
             break;
-        case BW::BW10:
-            bw = BW::BW10; bandwidth = 10e3; nRB = 50; nFFT = 1024;
+        case BW10:
+            bw = BW10; bandwidth = 10e3; nRB = 50; nFFT = 1024;
             break;
         }
         nSC = nRB * 12;
@@ -660,6 +660,9 @@ struct slot_demapper:runnable{
     grid(_grid), eq(_cfg){}
     void acquire() {
         state = mode::acquiring;
+    }
+    void set_mask(u8 mask) {
+        slot_mask = mask;
     }
     void run() override{
         const size_t count = cfg.nSC * cfg.nSym;

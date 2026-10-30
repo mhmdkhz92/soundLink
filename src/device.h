@@ -15,6 +15,7 @@ constexpr ma_uint32 SLEEP_THRESHOLD = SAMPLE_RATE / 5;
 namespace soundlink {
 
 struct tx_channel {
+    virtual void set_sltn(u8 n) = 0;
     virtual size_t available() = 0;
     virtual const float* samples() = 0;
     virtual void consume(size_t count) = 0;
@@ -25,11 +26,13 @@ struct tx_channel {
 struct frame_timing;
 
 struct rx_channel {
+    virtual void set_mask(u8 mask) = 0;
     virtual size_t writable() = 0;
     virtual float* samples() = 0;
     virtual void written(size_t count) = 0;
     virtual void step() = 0;
     virtual bool get_stamp(frame_timing& ft) = 0;
+    virtual void clear_stamp() = 0;
 
     virtual ~rx_channel() = default;
 };
@@ -80,6 +83,9 @@ struct audio_device {
         tx_stamp.sample = 24000;
         tx_stamp.slot_number = 1;
         }
+    void arm() {
+        m = mode::armed;
+    }
 
     void mix_audio(const std::vector<tx_channel*>& tx) {
         bool mix = false;
@@ -154,16 +160,41 @@ struct audio_device {
             count -= frames;
         }
     }
-    u8 next_opportunity(frame_timing* rx_report) {
-        uint64_t passed_slots = (played - rx_report->sample) / 24000;
-        u8 next = (rx_report->slot_number + passed_slots % 8 + 1) & 7u;
+    u8 next_opportunity(frame_timing* report) {
+        if (report->sample > played) {
+            tx_stamp = *report;
+            return tx_stamp.slot_number;
+        }
+        uint64_t passed_slots = (played - report->sample) / 24000;
+        u8 next = (report->slot_number + passed_slots % 8 + 1) & 7u;
 
-        tx_stamp.sample = rx_report->sample + (passed_slots + 1) * 24000;
+        tx_stamp.sample = report->sample + (passed_slots + 1) * 24000;
         tx_stamp.slot_number = next;
         return next;
     }
     void set_adjustment(int16_t adj){
         t_adj += adj;
+    }
+    bool adjustment_complete() const {
+        return t_adj == 0;
+    }
+    void stop_after_active_slots(unsigned count) {
+        stop_sample = tx_stamp.sample;
+        u8 slot_number = tx_stamp.slot_number;
+
+        while (count > 0) {
+            stop_sample += 24000;
+            if ((slt_mask >> (7 - slot_number)) & 1u)
+                --count;
+            slot_number = (slot_number + 1) & 7u;
+        }
+
+        stop_scheduled = true;
+    }
+    bool stop_ready() {
+        if (!stop_scheduled) return false;
+        uint64_t consumed = played - ma_pcm_rb_available_read(&speaker);
+        return consumed >= stop_sample;
     }
     void adjust(const std::vector<tx_channel*>& tx) {
         u8 current_slot = (tx_stamp.slot_number + 7) & 7u;
@@ -193,6 +224,7 @@ struct audio_device {
                 ma_pcm_rb_commit_write(&speaker, frames);
                 played += frames;
                 tx_stamp.sample += frames;
+                if (stop_scheduled) stop_sample += frames;
                 t_adj -= frames;
                 count -= frames;
             }
@@ -208,8 +240,19 @@ struct audio_device {
                 channel->consume(count);
 
             tx_stamp.sample -= count;
+            if (stop_scheduled) stop_sample -= count;
             t_adj += count;
         }
+    }
+    u8 update_mask(u8 _mask){
+        if (_mask == 0)
+            throw std::invalid_argument("Slot mask must contain an active slot");
+        slt_mask = _mask;
+        while (!((slt_mask >> (7 - tx_stamp.slot_number)) & 1u)) {
+            increment_stamp();
+        }
+        m = mode::armed;
+        return tx_stamp.slot_number;
     }
     ma_pcm_rb mic{};
     ma_pcm_rb speaker{};
@@ -222,6 +265,8 @@ private:
     uint64_t played = 0;
     int16_t t_adj = 0;
     bool adjusted = false;
+    bool stop_scheduled = false;
+    uint64_t stop_sample = 0;
     enum class mode : u8 { wait, armed, play };
     mode m = mode::wait;
     void increment_stamp(){
