@@ -2,21 +2,17 @@
 #define SOUNDLINK_XCHAIN_H
 
 #include "framework.h"
-#include "generic.h"
 #include "bch.h"
 #include "perm.h"
-#include "puncture.h"
 #include "viterbi.h"
-#include "math.h"
-#include "filter.h"
 #include "physical_layer.h"
 #include "dsp.h"
 #include "device.h"
 #include "data_link.h"
+#include <filesystem>
 
 namespace soundlink {
 
-using cfg_vec = std::vector<link_cfg>;
 inline cfg_vec make_link_configs(device dev, const channel_vec& channels) {
     cfg_vec configs;
     configs.reserve(channels.size());
@@ -26,7 +22,8 @@ inline cfg_vec make_link_configs(device dev, const channel_vec& channels) {
     return configs;
 }
 
-struct txdata_ch:tx_channel{
+struct txdata_ch:tx_channel, inspectable{
+    module_snapshot inspect() const override;
     txdata_ch(const link_cfg& _cfg, TxMessage& message, u8 mask)
         : sch(), cfg(_cfg),
           data(&sch, "data", 512),
@@ -94,7 +91,8 @@ private:
 };
 
 
-struct txctrl_ch:tx_channel {
+struct txctrl_ch:tx_channel, inspectable {
+    module_snapshot inspect() const override;
     txctrl_ch(const link_cfg& _cfg, TxctrlQueue& controls, u8 mask)
         : sch(), cfg(_cfg),
           data(&sch, "data", 256),
@@ -202,7 +200,8 @@ private:
     double offset;
     u32 checked_grid = 0;
 };
-struct rxdata_ch:rx_channel {
+struct rxdata_ch:rx_channel, inspectable {
+    module_snapshot inspect() const override;
 
     rxdata_ch(const link_cfg& _cfg, RxMessage& message,
          TxctrlQueue& controls, u8 mask, uint64_t origin = 0)
@@ -280,7 +279,8 @@ private:
 };
 
 
-struct rxctrl_ch:rx_channel {
+struct rxctrl_ch:rx_channel, inspectable {
+    module_snapshot inspect() const override;
     rxctrl_ch(const link_cfg& _cfg, rxCtrlQueue& controls, u8 mask, uint64_t origin = 0)
         : sch(), cfg(_cfg),
           audio(&sch, "audio", 48000),
@@ -400,15 +400,14 @@ inline const channel_vec fixed_ctrl_cfg = {
     {16, FEC12, BW3, QPSK}
 };
 
-struct sender {
-    enum class state { handshake, transfer, close };
-    state current = state::handshake;
+struct sender : inspectable {
+    module_snapshot inspect() const override;
+    enum class state {startup, handshake, transfer, close };
+    state current = state::startup;
     sender(const std::filesystem::path& path)
-        : ad(h_TDD),
-          msg(path, 160),
-          txctrl(20),
-          rxctrl(20) {
-        
+        : ad(h_TDD),msg(path, 160), txctrl(20), rxctrl(20) {}
+    void start(){
+        if (current != state::startup) return;
         cfg_vec ctrl = make_link_configs(device::sender, h_cfg);
         create_tx({}, ctrl, h_TDD, 0);
         create_rx(ctrl, u8(~h_TDD));
@@ -419,14 +418,17 @@ struct sender {
             ad.mix_audio(tx);
         }
         ad.start();
+        current = state::handshake;
     }
     void step() {
-        if (finished) return;
+        if (current == state::startup || finished) return;
         if(acked_timing && calculate_time(rx, timing_report)){
             if (txctrl.push(ctrl_factory::timing_adjustment(timing_report)))
                 acked_timing = false;
         }
         switch (current) {
+        case state::startup:
+            return;
         case state::handshake: {
             ad.read_mic(rx);
             for (auto* ch : rx) ch->step();
@@ -645,27 +647,31 @@ inline bool average_timing(const std::vector<rx_channel*>& rx, frame_timing& res
     result.slot_number = reference.slot_number;
     return true;
 }
-struct receiver {
-    enum class state { handshake, transfer, close };
-    state current = state::handshake;
+struct receiver : inspectable {
+    module_snapshot inspect() const override;
+    enum class state {startup, handshake, transfer, close };
+    state current = state::startup;
 
     receiver(const std::filesystem::path& path)
-        : ad(u8(~h_TDD)),
-          output_path(path),
-          txctrl(20),
-          rxctrl(20) {
+        : ad(u8(~h_TDD)),output_path(path), txctrl(20), rxctrl(20) {}
+    void start(){
+        if (current != state::startup) return;
 
         cfg_vec ctrl = make_link_configs(device::receiver, h_cfg);
         create_rx({}, ctrl, h_TDD);
         while (ma_pcm_rb_available_read(&ad.speaker) < TARGET_FILL)
             ad.mix_audio(tx);
         ad.start();
+        current = state::handshake;
+
     }
 
     void step() {
-        if (finished) return;
+        if (current == state::startup || finished) return;
 
         switch (current) {
+        case state::startup:
+            return;
         case state::handshake: {
             ad.read_mic(rx);
             for (auto* ch : rx) ch->step();

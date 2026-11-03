@@ -13,6 +13,7 @@ cmake-build-*/
 out/
 bin/
 obj/
+apps/
 
 # Compiled objects, libraries, and executables
 *.o

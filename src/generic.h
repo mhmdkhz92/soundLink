@@ -1,12 +1,11 @@
 #ifndef SOUNDLINK_GENERIC_H
 #define SOUNDLINK_GENERIC_H
 
+#include "framework.h"
 #include <sys/types.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include "framework.h"
-#include <algorithm>
 
 namespace soundlink {
 

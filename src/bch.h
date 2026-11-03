@@ -1,11 +1,8 @@
 #ifndef SOUNDLINK_BCH_H
 #define SOUNDLINK_BCH_H
 
-#include <cstdint>
-#include <cstddef>
-#include <cassert>
-
 #include "framework.h"
+#include <cassert>
 
 namespace soundlink{
 struct bch_config {

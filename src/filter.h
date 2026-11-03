@@ -2,6 +2,7 @@
 #define SOUNDLINK_FILTER_H
 
 #include "math.h"
+#include <cmath>
 
 namespace soundlink{
 

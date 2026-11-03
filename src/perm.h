@@ -2,8 +2,6 @@
 #define SOUNDLINK_PERM_H
 
 #include "framework.h"
-#include "bch.h"
-#include <vector>
 
 namespace soundlink {
 constexpr uint32_t SYNC_WORD = 0x1ACFFC1D;

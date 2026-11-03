@@ -1,11 +1,9 @@
 #ifndef SOUNDLINK_MATH_H
 #define SOUNDLINK_MATH_H
 
-#include <math.h>
-#include <complex>
-#include <climits>
-#include <type_traits>
 #include "framework.h"
+#include <cmath>
+#include <climits>
 
 namespace soundlink{
 constexpr float pi = 3.14159265358979323846f;

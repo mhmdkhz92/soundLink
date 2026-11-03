@@ -1,13 +1,10 @@
 #ifndef SOUNDLINK_VITERBI_H
 #define SOUNDLINK_VITERBI_H
 
-#include <stdio.h>
-#include <stdint.h>
-#include <algorithm>
-#include <cstring>
-
 #include "framework.h"
 #include "puncture.h"
+#include <algorithm>
+#include <cstring>
 
 namespace soundlink{
 extern unsigned char d_Partab[];

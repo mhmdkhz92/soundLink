@@ -1,39 +1,19 @@
 #ifndef SOUNDLINK_DEVICE_H
 #define SOUNDLINK_DEVICE_H
+
 #include "framework.h"
 #include "miniaudio.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
-
 constexpr ma_uint32 SAMPLE_RATE = 48000;
 constexpr ma_uint32 CAPACITY    = SAMPLE_RATE;      // 1 second.
 constexpr ma_uint32 TARGET_FILL = SAMPLE_RATE / 4;  // 250 ms.
 constexpr ma_uint32 SLEEP_THRESHOLD = SAMPLE_RATE / 5;
 
 namespace soundlink {
-
-struct tx_channel {
-    virtual void set_sltn(u8 n) = 0;
-    virtual size_t available() = 0;
-    virtual const float* samples() = 0;
-    virtual void consume(size_t count) = 0;
-    virtual void run() = 0;
-    virtual ~tx_channel() = default;
-};
-struct frame_timing;
-
-struct rx_channel {
-    virtual size_t writable() = 0;
-    virtual float* samples() = 0;
-    virtual void written(size_t count) = 0;
-    virtual void step() = 0;
-    virtual bool get_stamp(frame_timing& ft) = 0;
-    virtual void clear_stamp() = 0;
-
-    virtual ~rx_channel() = default;
-};
 
 struct frame_timing {
     uint64_t sample = 0;  // 48 kHz capture sample position.
@@ -50,10 +30,13 @@ struct frame_timing {
         };
     }
 };
+
 inline void audio_callback(ma_device* device, void* output, const void* input, ma_uint32 count);
 
 // One worker reads mic / writes speaker; the callback uses the opposite ends.
-struct audio_device {
+struct audio_device : inspectable {
+    module_snapshot inspect() const override;
+    void inspect_audio(const float* samples, size_t count) const;
     audio_device(u8 mask) : slt_mask(mask) {
         ma_pcm_rb_init(ma_format_f32, 1, CAPACITY, nullptr, nullptr, &mic);
         ma_pcm_rb_init(ma_format_f32, 1, CAPACITY, nullptr, nullptr, &speaker);
@@ -172,6 +155,7 @@ struct audio_device {
             ma_uint32 frames = static_cast<ma_uint32>(count);
             void* memory = nullptr;
             ma_pcm_rb_acquire_read(&mic, &frames, &memory);
+            inspect_audio(static_cast<const float*>(memory), frames);
 
             for (auto* channel : rx) {
                 std::memcpy(channel->samples(), memory, frames * sizeof(float));

@@ -1,16 +1,14 @@
 #ifndef SOUNDLINK_DATALINK_H
 #define SOUNDLINK_DATALINK_H
 
-
-#include <fstream>
-#include <filesystem>
-#include <cstdint>
-#include <vector>
-#include <string>
-#include <stdexcept>
-#include <cstring>
-#include <bitset>
 #include "framework.h"
+#include <algorithm>
+#include <bitset>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
+#include <utility>
 
 namespace soundlink{
 constexpr uint8_t packet_marker = 0xD3;
@@ -58,13 +56,7 @@ struct file_info {
     uint32_t file_size;
     uint8_t segment_size;
 };
-struct channel_info {
-    uint8_t fc;
-    uint8_t code_rate;
-    uint8_t bandwidth;
-    uint8_t mod;
-};
-using channel_vec = std::vector<channel_info>;
+
 
 struct ack {
     uint16_t base;
@@ -240,7 +232,8 @@ inline ctrl_packet ctrl_factory::close_ack(uint16_t sequence) {
     };
     return packet;
 }
-struct TxMessage {
+struct TxMessage : inspectable {
+    module_snapshot inspect() const override;
     std::vector<uint8_t> payload;
     file_info metadata;
     TxMessage(const std::filesystem::path& path, size_t max_len):
@@ -312,7 +305,8 @@ private:
     size_t cursor;
     size_t acked;
 };
-struct RxMessage {
+struct RxMessage : inspectable {
+    module_snapshot inspect() const override;
     std::vector<uint8_t> payload;
     std::vector<bool> received;
     size_t segment_size;
@@ -369,7 +363,8 @@ struct RxMessage {
     }
 };
 
-struct TxctrlQueue {
+struct TxctrlQueue : inspectable {
+    module_snapshot inspect() const override;
     TxctrlQueue(size_t m):maxqueue(m), sequence(0){};
     // New messages queued
     bool push(ctrl_packet packet) {
@@ -480,7 +475,8 @@ private:
     uint16_t sequence;
 };
 
-struct rxCtrlQueue {
+struct rxCtrlQueue : inspectable {
+    module_snapshot inspect() const override;
     rxCtrlQueue(size_t m) : maxqueue(m) {}
 
     bool push(ctrl_packet packet) {
@@ -651,7 +647,8 @@ private:
     bool genflag = false;
 };
 
-struct mrx_store:runnable{
+struct mrx_store:runnable, inspectable{
+    module_snapshot inspect() const override;
     mrx_store(scheduler* sch, pipebuf<u8>& _in, RxMessage& _rx, TxctrlQueue& _tctrl)
     :runnable(sch, "MRX"), in(_in), rx(_rx), tctrl(_tctrl){}
     void run() override{
@@ -670,12 +667,15 @@ struct mrx_store:runnable{
             }
             uint16_t segment = uint16_t(rd[2] << 8) | uint16_t(rd[3]);
             size_t length = size_t(rd[4]);
-            if (rx.store(segment, rd + 5, length))
+            if (rx.store(segment, rd + 5, length)) {
+                accepted_payload_bytes += length;
                 tctrl.push_ack(segment);
+            }
             in.read(offset + 9 + length);
         }
     }
 private:
+    uint64_t accepted_payload_bytes = 0;
     pipereader<u8> in;
     RxMessage& rx;
     TxctrlQueue& tctrl;

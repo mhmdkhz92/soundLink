@@ -7,13 +7,15 @@
 #include <string.h>
 #include <complex>
 #include <cstddef>
-#include <math.h>
+#include <vector>
+#include <variant>
+#include <string>
 
 namespace soundlink{
-void fatal(const char *s){
+inline void fatal(const char *s){
         perror(s);exit(1);
 }
-void fail(const char *s){
+inline void fail(const char *s){
         fprintf(stderr, "** %s\n", s);exit(1);
 }
 //////////////////////////////////////////////////////////////////////
@@ -23,6 +25,7 @@ void fail(const char *s){
 static const int MAX_PIPES = 64;
 static const int MAX_RUNNABLES = 64;
 static const int MAX_READERS = 8;
+static const uint16_t NSYM_PER_RB = 6;
 
 typedef uint32_t u32;
 typedef uint16_t u16;
@@ -367,8 +370,107 @@ private:
     uint16_t held;
     size_t nheld;
 };
+
+
+//////////////////////////////////////////////////////////////////////
+// shared definitions and interfaces
+//////////////////////////////////////////////////////////////////////
+enum class device{
+    sender, receiver
+};
+enum BW{
+    BW1_4, BW3, BW5, BW10};
+enum modulation{
+    BPSK = 1, QPSK = 2, QAM16 = 4, QAM64 = 6};
+
 enum code_rate {
 	FEC12, FEC23, FEC34, FEC56, FEC78,
+};
+
+struct link_cfg{
+    device dev;
+    BW bw;                  // bandwidth in BW enum
+    int fc;                 // center frequency
+    float bandwidth;        // bandwidth in Hz
+    float sr;               // sample rate
+    u16 nRB;                // number of resource blocks
+    u16 nSC;                // number of active subcarriers
+    u16 nFFT;               // number of FFT points
+    u16 nSym;               // number of symbols ber slot
+    u16 cp;                 // number of cyclic prefix points
+    code_rate cr;           // convolutional rate
+    modulation mod;           // modulation type
+    link_cfg(device _dev, int _fc, BW _bw, code_rate _cr, modulation _m = QPSK)
+    :dev(_dev), fc(_fc), nSym(NSYM_PER_RB), cr(_cr), mod(_m){
+        switch (_bw){
+        case BW1_4:
+            bw = BW1_4; bandwidth = 1.4e3; nRB = 6; nFFT = 128;
+            break;
+        case BW3:
+            bw = BW3; bandwidth = 3e3; nRB = 15; nFFT = 256;
+            break;
+        case BW5:
+            bw = BW5; bandwidth = 5e3; nRB = 25; nFFT = 512;
+            break;
+        case BW10:
+            bw = BW10; bandwidth = 10e3; nRB = 50; nFFT = 1024;
+            break;
+        }
+        nSC = nRB * 12;
+        sr = nFFT * 15;
+        cp = nFFT / 4;
+    }
+};
+
+struct tx_channel {
+    virtual void set_sltn(u8 n) = 0;
+    virtual size_t available() = 0;
+    virtual const float* samples() = 0;
+    virtual void consume(size_t count) = 0;
+    virtual void run() = 0;
+    virtual ~tx_channel() = default;
+};
+
+struct frame_timing;
+
+struct rx_channel {
+    virtual size_t writable() = 0;
+    virtual float* samples() = 0;
+    virtual void written(size_t count) = 0;
+    virtual void step() = 0;
+    virtual bool get_stamp(frame_timing& ft) = 0;
+    virtual void clear_stamp() = 0;
+
+    virtual ~rx_channel() = default;
+};
+struct channel_info {
+    uint8_t fc;
+    uint8_t code_rate;
+    uint8_t bandwidth;
+    uint8_t mod;
+};
+using channel_vec = std::vector<channel_info>;
+using cfg_vec = std::vector<link_cfg>;
+
+
+//////////////////////////////////////////////////////////////////////
+// information collectors
+//////////////////////////////////////////////////////////////////////
+using inspect_value = std::variant<bool, std::int64_t, std::uint64_t, double, std::string>;
+
+struct inspect_field {
+    std::string id, label, unit;
+    inspect_value value;
+};
+
+struct module_snapshot {
+    std::string id, label;
+    std::vector<inspect_field> fields;
+};
+
+struct inspectable {
+    virtual module_snapshot inspect() const = 0;
+    virtual ~inspectable() = default;
 };
 }
 #endif  
