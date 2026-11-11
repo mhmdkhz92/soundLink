@@ -250,9 +250,8 @@ private:
 
 
     void write_file(const std::string& path) {
-        auto config = ma_encoder_config_init(ma_encoding_format_wav, ma_format_f32, 1, 48000);
-        ma_encoder encoder{};
-        if (ma_encoder_init_file(path.c_str(), &config, &encoder) != MA_SUCCESS)
+        std::FILE* file = std::fopen(path.c_str(), "wb");
+        if (!file)
             return;
 
         while (!stopping.load(std::memory_order_acquire) ||
@@ -264,11 +263,11 @@ private:
                 continue;
             }
 
-            ma_encoder_write_pcm_frames(&encoder, src, count, nullptr);
+            std::fwrite(src, sizeof(float), count, file);
             ma_pcm_rb_commit_read(&ring, count);
         }
 
-        ma_encoder_uninit(&encoder);
+        std::fclose(file);
     }
 };
 

@@ -837,7 +837,16 @@ struct ofdm_modulator: runnable{
     cfg(_cfg),
     fft_engine(_cfg.nFFT),
     in(_in), 
-    out(_out, (cfg.nFFT + cfg.cp) * cfg.nSym){};
+    out(_out, (cfg.nFFT + cfg.cp) * cfg.nSym),
+    overlap(cfg.nFFT / 16),
+    rise(overlap),
+    tail(overlap, cf32(0.0f)){
+        for (size_t i = 0; i < overlap; ++i) {
+            float sine = std::sin(pi * (float(i) + 0.5f) / (2.0f * overlap));
+            rise[i] = sine * sine;
+    }
+
+    };
     void run() override{
         if(in.readable() < cfg.nSC * cfg.nSym ||
             out.writable() < (cfg.nFFT + cfg.cp) * cfg.nSym)
@@ -862,6 +871,13 @@ struct ofdm_modulator: runnable{
             fft_engine.inverse(symout + cfg.cp);
             std::memmove(symout.re, symout.re + cfg.nFFT, sizeof(float) * cfg.cp);
             std::memmove(symout.im, symout.im + cfg.nFFT, sizeof(float) * cfg.cp);
+            for (size_t i = 0; i < overlap; ++i) {
+                const cf32 prefix = symout[i];
+                const cf32 suffix = symout[cfg.cp + i];
+
+                symout[i] = rise[i] * prefix + tail[i];
+                tail[i] = (1.0f - rise[i]) * suffix;
+            }
             symin += cfg.nSC;
             symout += cfg.nFFT + cfg.cp;
             sym_index ++;
@@ -874,6 +890,9 @@ private:
     fft fft_engine;
     pipereader<float> in;
     pipewriter <float> out;
+    const size_t overlap;
+    std::vector<float> rise;
+    std::vector<cf32> tail;
 
 
 };

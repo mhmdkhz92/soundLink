@@ -171,7 +171,7 @@ struct rxdata_ch:rx_channel {
     rxdata_ch(const link_cfg& _cfg, RxMessage& message,
          TxctrlQueue& controls, u8 mask, uint64_t origin = 0)
         : rx_channel("rxdata", _cfg),
-          wave(&sch, "wave", 8096),
+          wave(&sch, "wave", 8192),
           grid(&sch, "grid", 8096),
           bits(&sch, "bits", 24000),
           mixed(&sch, "mixed", 8096),
@@ -240,7 +240,7 @@ private:
 struct rxctrl_ch:rx_channel {
     rxctrl_ch(const link_cfg& _cfg, rxCtrlQueue& controls, u8 mask, uint64_t origin = 0)
         : rx_channel("rxctrl", _cfg),
-          wave(&sch, "wave", 8096),
+          wave(&sch, "wave", 8192),
           grid(&sch, "grid", 8096),
           bits(&sch, "bits", 24000),
           mixed(&sch, "mixed", 8096),
@@ -352,25 +352,28 @@ inline constexpr u8 t_TDD = 0b11101110;  // TDD pattern in transfer
 inline const channel_vec h_cfg = {
     {4, FEC12, BW3, QPSK},
     {8, FEC12, BW3, QPSK},
-    {10,FEC12, BW1_4, QPSK},
-    {15,FEC12, BW1_4, QPSK}
+    {15,FEC12, BW3, QPSK},
 };
 
 // Fixed transfer configuration; center frequencies are in kHz.
 inline const channel_vec fixed_data_cfg = {
-    {3, FEC34, BW5, QPSK},
-    {8, FEC34, BW5, QPSK},
+    {4, FEC34, BW5, QPSK},
+    {10, FEC34, BW3, QPSK},
 };
 inline const channel_vec fixed_ctrl_cfg = {
-    {12, FEC12, BW3, QPSK}
+    {15, FEC12, BW3, QPSK}
+};
+
+inline const channel_vec transfer_return_cfg = {
+    {15, FEC12, BW3, QPSK},
 };
 
 struct sender {
     enum class state {startup, handshake, transfer, close };
     state current = state::startup;
     bool is_finished() const { return finished; }
-    sender(const std::filesystem::path& path)
-        : ad(h_TDD),msg(path, 160), txctrl(20), rxctrl(20) {}
+    sender(const std::filesystem::path& path, const char* recording_path = nullptr)
+        : ad(h_TDD, recording_path),msg(path, 160), txctrl(20), rxctrl(20) {}
     void start(){
         if (current != state::startup) return;
         cfg_vec ctrl = make_link_configs(device::sender, h_cfg);
@@ -418,7 +421,7 @@ struct sender {
                     // ready for tansission mode
                     cfg_vec data = make_link_configs(device::sender, data_cfg);
                     cfg_vec tx_ctrl = make_link_configs(device::sender, ctrl_cfg);
-                    cfg_vec rx_ctrl = make_link_configs(device::sender, h_cfg);
+                    cfg_vec rx_ctrl = make_link_configs(device::sender, transfer_return_cfg);
 
                     u8 next_slot = ad.update_mask(t_TDD);
                     create_tx(data, tx_ctrl, t_TDD, next_slot);
@@ -655,7 +658,12 @@ struct receiver {
     bool is_finished() const { return finished; }
 
     receiver(const std::filesystem::path& path, const char* recording_path = nullptr)
-        : ad(u8(~h_TDD), recording_path),output_path(path), txctrl(20), rxctrl(20) {}
+    : ad(u8(~h_TDD), recording_path),
+    output_path(path),
+    txctrl(20),
+    rxctrl(20),
+    transfer_data_cfg(fixed_data_cfg),
+    transfer_ctrl_cfg(fixed_ctrl_cfg){}
     void start(){
         if (current != state::startup) return;
 
@@ -666,6 +674,11 @@ struct receiver {
         ad.start();
         current = state::handshake;
 
+    }
+    void set_tr_channels(channel_vec *data, channel_vec *ctrl){
+        transfer_data_cfg = *data;
+        transfer_ctrl_cfg = *ctrl;
+        
     }
 
     void step() {
@@ -719,10 +732,10 @@ struct receiver {
             ad.mix_audio(tx);
 
             if (pre_defined_conf && tx_init && msg) {
-                txctrl.push(ctrl_factory::config(fixed_data_cfg, fixed_ctrl_cfg));
+                txctrl.push(ctrl_factory::config(transfer_data_cfg, transfer_ctrl_cfg));
 
-                cfg_vec data = make_link_configs(device::receiver, fixed_data_cfg);
-                cfg_vec ctrl = make_link_configs(device::receiver, fixed_ctrl_cfg);
+                cfg_vec data = make_link_configs(device::receiver, transfer_data_cfg);
+                cfg_vec ctrl = make_link_configs(device::receiver, transfer_ctrl_cfg);
                 create_rx(data, ctrl, t_TDD);
                 current = state::transfer;
             }
@@ -739,7 +752,7 @@ struct receiver {
                 txctrl.remove_type(ctrl_type::config);
                 u8 next_slot = ad.update_mask(u8(~t_TDD));
 
-                cfg_vec ctrl = make_link_configs(device::receiver, h_cfg);
+                cfg_vec ctrl = make_link_configs(device::receiver, transfer_return_cfg);
                 create_tx(ctrl, u8(~t_TDD), next_slot);
                 transfer_confirmed = true;
             }
@@ -906,6 +919,10 @@ private:
     bool pre_defined_conf = false;
     bool transfer_confirmed = false;
     bool finished = false;
+    
+    // settings
+    channel_vec transfer_data_cfg;
+    channel_vec transfer_ctrl_cfg;
 };
 
 } // namespace soundlink
