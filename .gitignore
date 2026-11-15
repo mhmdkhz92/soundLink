@@ -1,0 +1,7 @@
+/Apple/
+*.xcodeproj
+.DS_Store
+.vscode/
+/build/
+__pycache__/
+/.venv/

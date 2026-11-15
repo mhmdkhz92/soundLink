@@ -1,0 +1,10 @@
+{
+  "data": [
+    {"center_khz": 3,  "bandwidth_khz": 3, "modulation": "QPSK",  "code_rate": "3/4"},
+    {"center_khz": 6,  "bandwidth_khz": 3, "modulation": "16QAM", "code_rate": "5/6"},
+    {"center_khz": 9,  "bandwidth_khz": 3, "modulation": "16QAM", "code_rate": "3/4"}
+  ],
+  "control": [
+    {"center_khz": 17, "bandwidth_khz": 1.4, "modulation": "QPSK", "code_rate": "1/2"}
+  ]
+}
